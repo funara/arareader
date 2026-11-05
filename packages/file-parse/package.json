@@ -1,0 +1,27 @@
+{
+  "name": "@arareader/file-parse",
+  "version": "1.0.0",
+  "license": "GPL-3.0-or-later",
+  "private": true,
+  "type": "module",
+  "description": "shared attachment parsing: pdf, docx, slide decks, spreadsheets and plain text to text; images flagged for multimodal input",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@arareader/docx-engine": "*",
+    "fast-xml-parser": "^5.3.4",
+    "jszip": "^3.10.1",
+    "pdfjs-dist": "^6.2.108"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

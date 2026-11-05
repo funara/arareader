@@ -1,0 +1,43 @@
+{
+  "name": "arareader",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone smart PDF reader and editor",
+  "author": "Adhi Rahmadian",
+  "license": "GPL-3.0-or-later",
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=10"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "postinstall": "install-electron",
+    "format": "node tools/format-changed.mjs --write",
+    "format:check": "node tools/format-changed.mjs --check",
+    "lint": "eslint .",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm test -w @arareader/desktop && npm test -w @arareader/pdf",
+    "test:e2e": "playwright test --config e2e/playwright.config.ts",
+    "build": "npm run build -w @arareader/pdf && npm run build -w @arareader/desktop",
+    "dev": "concurrently -k -n pdf,desktop -c red,magenta \"npm run dev:renderer -w @arareader/pdf\" \"npm run dev -w @arareader/desktop\"",
+    "licenses": "node tools/check-licenses.mjs",
+    "start": "npm run start -w @arareader/desktop",
+    "notices": "node tools/gen-third-party-notices.mjs",
+    "dist:win": "npm run build && npm run notices && npm run dist:win -w @arareader/desktop",
+    "dist:mac": "npm run build && npm run notices && npm run dist:mac -w @arareader/desktop",
+    "dist:linux": "npm run build && npm run notices && npm run dist:linux -w @arareader/desktop"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.0",
+    "@playwright/test": "^1.61.1",
+    "concurrently": "^9.2.4",
+    "eslint": "^10.8.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.8.0",
+    "prettier": "^3.9.6",
+    "typescript-eslint": "^8.65.0"
+  }
+}

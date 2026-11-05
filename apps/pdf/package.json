@@ -1,0 +1,37 @@
+{
+  "name": "@arareader/pdf",
+  "productName": "ARAReader",
+  "version": "0.1.0",
+  "license": "GPL-3.0-or-later",
+  "private": true,
+  "description": "PDF viewer module: PDF.js render + text layer + thumbnails, hosted by the ARAReader desktop host",
+  "scripts": {
+    "dev:renderer": "vite --config vite.renderer.config.ts",
+    "build": "electron-vite build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@arareader/agent-core": "*",
+    "@arareader/ai-provider": "*",
+    "@arareader/electron-utils": "*",
+    "@arareader/i18n": "*",
+    "@arareader/project-store": "*",
+    "@arareader/ui": "*",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.0.4",
+    "electron": "^43.3.0",
+    "electron-vite": "^5.0.0",
+    "jsdom": "^28.0.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.2.108",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "vite-plugin-static-copy": "^3.0.0",
+    "vitest": "^4.1.10"
+  },
+  "author": "ARAReader"
+}
