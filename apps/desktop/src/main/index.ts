@@ -696,6 +696,10 @@ void app.whenReady().then(async () => {
     return
   }
 
+  // Startup identity banner: once per launch, main process only. A GUI launch from
+  // Explorer has no attached console; terminal and dev runs show it.
+  console.log(`ARAReader ${app.getVersion()} by Adhi Rahmadian - ${REPO_URL}`)
+
   if (process.platform === 'win32') app.setAppUserModelId('com.arareader.app')
 
   await primeUiSettings()

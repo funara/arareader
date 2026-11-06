@@ -924,7 +924,9 @@ const rebaseOutline = (nodes: OutlineEditNode[], from: number[], to: number[]): 
 /** Scale factor applied when placing a signature: 1/3 of the displayed page width,
     capped at 1/6 of its height so tall images stay signature-sized */
 const signPlaceK = (sig: SignatureData, dispW: number, dispH: number): number =>
-  Math.min(dispW / 3 / sig.width, dispH / 6 / sig.height)
+  sig.kind === 'image' && sig.qr
+    ? Math.min((dispW * (sig.qrWithSignature ? 1 : 0.8)) / sig.width, dispH / 2 / sig.height)
+    : Math.min(dispW / 3 / sig.width, dispH / 6 / sig.height)
 
 /** Click-to-place overlay: a translucent ghost of the pending signature follows the
     cursor at its actual landing size, and clicking drops it centered on that point */
@@ -986,7 +988,7 @@ function SignDropOverlay({
                     key={i}
                     points={pts.join(' ')}
                     fill="none"
-                    stroke={cssRgb(color)}
+                    stroke={cssRgb(sig.color ?? color)}
                     strokeWidth={2.4}
                     strokeLinecap="round"
                     strokeLinejoin="round"
@@ -1377,6 +1379,7 @@ export default function App() {
           const vp = page.getViewport({ scale: 1, rotation: 0 })
           all[i - 1] = { width: vp.width, height: vp.height }
           rots[i - 1] = page.rotate ?? 0
+          return undefined
         }),
       )
       setLoadProgress({ loaded: end, total })
@@ -2155,7 +2158,13 @@ export default function App() {
         ...prev,
         {
           id: newId(),
-          input: { kind: 'ink', pageIndex: origIdx, color: drawColor, width: 1.6, paths },
+          input: {
+            kind: 'ink',
+            pageIndex: origIdx,
+            color: sig.color ?? drawColor,
+            width: 1.6,
+            paths,
+          },
         },
       ])
     }
@@ -3110,6 +3119,22 @@ export default function App() {
     selected?.kind === 'drawing'
       ? (drawings.find((d) => d.id === selected.id && d.input.kind === 'freetext') ?? null)
       : null
+  const selectedImage =
+    selected?.kind === 'drawing'
+      ? (drawings.find((d) => d.id === selected.id && d.input.kind === 'image') ?? null)
+      : null
+
+  const copySelectedImage = async () => {
+    if (!selectedImage || selectedImage.input.kind !== 'image') return
+    try {
+      const bytes = Uint8Array.from(atob(selectedImage.input.image), (char) => char.charCodeAt(0))
+      await navigator.clipboard.write([
+        new ClipboardItem({ 'image/png': new Blob([bytes], { type: 'image/png' }) }),
+      ])
+    } catch (err) {
+      opFailed(err instanceof Error ? err.message : String(err))
+    }
+  }
 
   /**
    * Command palette rows: every ribbon action, reachable by typing its label. Plain array per
@@ -5014,8 +5039,17 @@ export default function App() {
                     {t('editText')}
                   </button>
                 )}
+                {selectedImage && (
+                  <button
+                    type="button"
+                    className="pdf-del-edit"
+                    onClick={() => void copySelectedImage()}
+                  >
+                    {t('copyImage')}
+                  </button>
+                )}
                 <button type="button" onClick={deleteSelected}>
-                  {t('deleteAnnotation')}
+                  {t('removeAnnotationAction')}
                 </button>
               </div>
             )}

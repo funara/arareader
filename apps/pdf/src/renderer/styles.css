@@ -1996,6 +1996,27 @@ textarea {
 
 /* ---- Signature Dialog ---- */
 
+.pdf-modal-signature {
+  max-height: calc(100vh - 84px);
+  overflow-y: auto;
+}
+
+.pdf-modal-signature-layout {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 600px;
+  container-type: inline-size;
+}
+
+.pdf-modal-signature > .pdf-modal-actions {
+  position: sticky;
+  bottom: -20px;
+  z-index: 2;
+  background: var(--surface);
+  padding: 8px 0 0;
+}
+
 .pdf-sign-saved-bar {
   display: flex;
   flex-direction: column;
@@ -2037,7 +2058,8 @@ textarea {
     color 120ms ease;
 }
 
-.pdf-sign-saved-chip:hover {
+.pdf-sign-saved-chip:hover,
+.pdf-sign-saved-chip.active {
   border-color: var(--accent);
   background: var(--active-bg);
   color: var(--accent);
@@ -2052,8 +2074,27 @@ textarea {
   font-weight: 600;
 }
 
+.pdf-sign-saved-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 420px;
+  max-width: 100%;
+  height: 150px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.pdf-sign-saved-preview img,
+.pdf-sign-saved-preview svg {
+  max-width: 100%;
+  max-height: 100%;
+}
+
 .pdf-sign-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
@@ -2082,6 +2123,162 @@ textarea {
   background: var(--accent);
   border-color: var(--accent);
   color: #ffffff;
+}
+
+.pdf-modal-signature-layout .pdf-sign-qr-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 240px;
+  gap: 16px;
+}
+
+.pdf-sign-qr-preview {
+  display: grid;
+  align-content: start;
+  align-self: start;
+  justify-items: end;
+  gap: 8px;
+  min-width: 0;
+}
+
+@container (max-width: 500px) {
+  .pdf-modal-signature-layout .pdf-sign-qr-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.pdf-sign-qr-fields {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  width: 420px;
+  max-width: 100%;
+}
+
+.pdf-sign-qr-fields label:not(.pdf-sign-switch) {
+  display: grid;
+  gap: 4px;
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.pdf-sign-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.pdf-sign-switch input {
+  position: absolute;
+  opacity: 0;
+}
+
+.pdf-sign-switch-track {
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: #8b919d;
+  position: relative;
+  flex: none;
+  transition: background-color 120ms ease;
+}
+
+.pdf-sign-switch-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 120ms ease;
+}
+
+.pdf-sign-switch input:checked + .pdf-sign-switch-track {
+  background: var(--accent);
+}
+.pdf-sign-switch input:checked + .pdf-sign-switch-track::after {
+  transform: translateX(16px);
+}
+.pdf-sign-switch input:focus-visible + .pdf-sign-switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.pdf-sign-switch input:disabled + .pdf-sign-switch-track {
+  opacity: 0.5;
+}
+
+.pdf-sign-preview-caption {
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.pdf-sign-layout-stage {
+  position: relative;
+  width: 100%;
+  max-width: 240px;
+  aspect-ratio: 1;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+}
+
+.pdf-sign-layout-item {
+  position: absolute;
+  display: flex;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: move;
+  touch-action: none;
+  user-select: none;
+}
+
+.pdf-sign-layout-item img,
+.pdf-sign-layout-item svg {
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.pdf-sign-layout-qr {
+  z-index: 2;
+  background: #fff;
+}
+
+.pdf-sign-layout-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.pdf-sign-resize-handle {
+  position: absolute;
+  z-index: 1;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 2px solid #fff;
+  border-radius: 3px;
+  background: var(--accent);
+  transform: translate(-100%, -100%);
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
+.pdf-sign-resize-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pdf-sign-switch-track,
+  .pdf-sign-switch-track::after {
+    transition: none;
+  }
 }
 
 .pdf-sign-pad {
