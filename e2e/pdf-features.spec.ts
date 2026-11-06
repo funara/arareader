@@ -194,6 +194,48 @@ test('QR Digital signature uses the profile and survives saving', async () => {
   const launched = await launchApp({ openFile: path })
   try {
     const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
+    const selectMode = pdf.locator('.ribbon-mode-group button[title="Select"]')
+    const editMode = pdf.locator('.ribbon-mode-group button[title="Edit PDF"]')
+    await expect(selectMode).toHaveAttribute('aria-pressed', 'true')
+    await expect(editMode).toHaveAttribute('aria-pressed', 'false')
+    await pdf.locator('.ribbon').screenshot({ path: screenshotPath('pdf-modes-wide') })
+    const viewport = await pdf.evaluate(() => ({
+      width: window.innerWidth,
+      height: window.innerHeight,
+    }))
+    await pdf.setViewportSize({ width: 620, height: 800 })
+    await pdf.locator('.ribbon-body').evaluate((body) => {
+      body.scrollLeft = body.scrollWidth
+    })
+    const modeBounds = await selectMode.evaluate((button) => {
+      const group = button.parentElement!.getBoundingClientRect()
+      const toolbar = button.closest('.ribbon-body')!.getBoundingClientRect()
+      return { left: group.left - toolbar.left, right: group.right - toolbar.right }
+    })
+    expect(modeBounds.left).toBeGreaterThanOrEqual(-1)
+    expect(modeBounds.right).toBeLessThanOrEqual(1)
+    await pdf.locator('.ribbon').screenshot({ path: screenshotPath('pdf-modes-narrow') })
+    await pdf.setViewportSize(viewport)
+    await pdf.locator('.ribbon-body').evaluate((body) => {
+      body.scrollLeft = 0
+    })
+    await selectMode.click()
+    await expect(selectMode).toHaveAttribute('aria-pressed', 'true')
+    await editMode.click()
+    await editMode.click()
+    await expect(editMode).toHaveAttribute('aria-pressed', 'true')
+    await expect(selectMode).toHaveAttribute('aria-pressed', 'false')
+    await pdf
+      .locator('.ribbon-tab')
+      .filter({ hasText: /^Edit$/ })
+      .click()
+    await expect(selectMode).toBeVisible()
+    await expect(editMode).toBeVisible()
+    await pdf
+      .locator('.ribbon-tab')
+      .filter({ hasText: /^Home$/ })
+      .click()
+    await selectMode.click()
     await pdf.locator('.rb-big[title="Signature"]').first().click()
     const dialog = pdf.locator('.pdf-modal')
     await expect(dialog.getByRole('button', { name: 'Signature', exact: true })).toHaveClass(
@@ -229,10 +271,13 @@ test('QR Digital signature uses the profile and survives saving', async () => {
     await dialog.screenshot({ path: screenshotPath('pdf-qr-dialog') })
     await expect(dialog.getByText('Save to Vault')).toHaveCount(0)
     await dialog.getByRole('button', { name: 'Place' }).click()
+    await expect(selectMode).toHaveAttribute('aria-pressed', 'true')
     await pdf
       .locator('.pdf-sign-drop')
       .first()
       .click({ position: { x: 250, y: 250 } })
+    await expect(editMode).toHaveAttribute('aria-pressed', 'true')
+    await expect(selectMode).toHaveAttribute('aria-pressed', 'false')
     await expect(pdf.locator('.tb-save-pending')).toBeVisible()
     await pdf.keyboard.press(process.platform === 'darwin' ? 'Meta+s' : 'Control+s')
     await expect
@@ -363,14 +408,43 @@ for (const kind of ['strokes', 'image'] as const) {
       await dialog.getByRole('button', { name: 'Place' }).click()
       await expect(pdf.locator('.pdf-sign-drop')).toHaveCount(1)
       await pdf.locator('.pdf-sign-drop').hover({ position: { x: 250, y: 250 } })
-      if (kind === 'strokes')
+      if (kind === 'strokes') {
         await expect(pdf.locator('.pdf-sign-ghost polyline')).toHaveAttribute(
           'stroke',
           'rgb(0, 0, 255)',
         )
-      else await expect(pdf.locator('.pdf-sign-ghost img')).toBeVisible()
+        await pdf.locator('.pdf-sign-drop').click({ position: { x: 250, y: 250 } })
+        await expect(pdf.locator('.ribbon-mode-group button[title="Edit PDF"]')).toHaveAttribute(
+          'aria-pressed',
+          'true',
+        )
+        await pdf.locator('.ribbon-mode-group button[title="Select"]').click()
+        const ink = pdf.locator('.pdf-draw-shape').first()
+        const before = (await ink.boundingBox())!
+        await pdf.mouse.move(before.x + before.width / 2, before.y + before.height / 2)
+        await pdf.mouse.down()
+        await pdf.mouse.move(before.x + before.width / 2 + 30, before.y + before.height / 2 + 30)
+        await pdf.mouse.up()
+        expect((await ink.boundingBox())!.x).toBeCloseTo(before.x, 0)
+        await pdf.keyboard.press('Escape')
+        await pdf.locator('.rb-big[title="Edit PDF"]').first().click()
+        await pdf.mouse.move(before.x + before.width / 2, before.y + before.height / 2)
+        await pdf.mouse.down()
+        await pdf.mouse.move(before.x + before.width / 2 + 30, before.y + before.height / 2 + 30)
+        await pdf.mouse.up()
+        expect((await ink.boundingBox())!.x).toBeGreaterThan(before.x + 20)
+        await pdf.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z')
+        await pdf.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z')
+        await pdf.locator('.ribbon-mode-group button[title="Select"]').click()
+      } else {
+        await expect(pdf.locator('.pdf-sign-ghost img')).toBeVisible()
+      }
       await pdf.keyboard.press('Escape')
       await expect(pdf.locator('.pdf-sign-drop')).toHaveCount(0)
+      await expect(pdf.locator('.ribbon-mode-group button[title="Select"]')).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      )
       await pdf.locator('.rb-big[title="Signature"]').first().click()
       await dialog.getByRole('button', { name: 'QR Signature' }).click()
       const checkbox = dialog.getByRole('switch', { name: 'With primary signature' })
@@ -712,7 +786,60 @@ for (const kind of ['strokes', 'image'] as const) {
           },
         })
       })
+      const editButton = pdf.locator('.ribbon-mode-group button[title="Edit PDF"]')
+      const selectButton = pdf.locator('.ribbon-mode-group button[title="Select"]')
+      await expect(editButton).toHaveAttribute('aria-pressed', 'true')
+      await selectButton.click()
       const shape = pdf.locator('.pdf-draw-shape').first()
+      const beforeSelectDrag = (await shape.boundingBox())!
+      await pdf.mouse.move(beforeSelectDrag.x + 10, beforeSelectDrag.y + 10)
+      expect(await shape.evaluate((el) => getComputedStyle(el).opacity)).toBe('1')
+      await pdf.mouse.click(beforeSelectDrag.x + 10, beforeSelectDrag.y + 10)
+      await expect(pdf.locator('.pdf-del-popup')).toHaveCount(0)
+      await pdf.keyboard.press('Delete')
+      await expect(shape).toHaveCount(1)
+      await pdf.mouse.down()
+      await pdf.mouse.move(beforeSelectDrag.x + 40, beforeSelectDrag.y + 40)
+      await pdf.mouse.up()
+      const afterSelectDrag = (await shape.boundingBox())!
+      expect(afterSelectDrag.x).toBeCloseTo(beforeSelectDrag.x, 0)
+      expect(afterSelectDrag.y).toBeCloseTo(beforeSelectDrag.y, 0)
+      await expect(pdf.locator('.pdf-draw-handle')).toHaveCount(0)
+
+      await editButton.click()
+      await expect(editButton).toHaveClass(/active/)
+      await pdf.keyboard.press('Escape')
+      const beforeEditDrag = (await shape.boundingBox())!
+      await pdf.mouse.move(beforeEditDrag.x + 10, beforeEditDrag.y + 10)
+      await pdf.mouse.down()
+      await pdf.mouse.move(beforeEditDrag.x + 40, beforeEditDrag.y + 40)
+      await pdf.mouse.up()
+      const afterEditDrag = (await shape.boundingBox())!
+      expect(afterEditDrag.x).toBeGreaterThan(beforeEditDrag.x + 20)
+      await shape.click({ position: { x: 10, y: 10 } })
+      const handles = pdf.locator('.pdf-draw-handle')
+      await expect(handles).toHaveCount(4)
+      const corner = (await handles.first().boundingBox())!
+      await pdf.mouse.move(corner.x + corner.width / 2, corner.y + corner.height / 2)
+      await pdf.mouse.down()
+      await pdf.mouse.move(corner.x + corner.width / 2 - 30, corner.y + corner.height / 2 - 30)
+      await pdf.mouse.up()
+      const afterResize = (await shape.boundingBox())!
+      expect(afterResize.width).toBeGreaterThan(afterEditDrag.width + 10)
+      await selectButton.click()
+      await expect(handles).toHaveCount(0)
+      await expect(pdf.locator('.pdf-del-popup')).toHaveCount(0)
+      await pdf.keyboard.press('Delete')
+      await expect(shape).toHaveCount(1)
+      const beforeSecondDrag = (await shape.boundingBox())!
+      await pdf.mouse.move(beforeSecondDrag.x + 10, beforeSecondDrag.y + 10)
+      await pdf.mouse.down()
+      await pdf.mouse.move(beforeSecondDrag.x + 40, beforeSecondDrag.y + 40)
+      await pdf.mouse.up()
+      expect((await shape.boundingBox())!.x).toBeCloseTo(beforeSecondDrag.x, 0)
+      await pdf.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z')
+      await pdf.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z')
+      await editButton.click()
       await shape.click({ position: { x: 10, y: 10 } })
       const popup = pdf.locator('.pdf-del-popup')
       await popup.getByRole('button', { name: 'Copy' }).click()

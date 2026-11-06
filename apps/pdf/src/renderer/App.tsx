@@ -466,6 +466,11 @@ const IconExportImg = () => (
     <path d="M4.8 14.95 L9 11.75 L12.4 14.35 L15 12.35 L19.2 15.75" />
   </Icon>
 )
+const IconSelect = () => (
+  <Icon>
+    <path d="M6 4.5 L6 17.5 L9.7 14 L12.2 19.5 L14.4 18.5 L11.9 13 L17 12.4 Z" />
+  </Icon>
+)
 const IconEditPdf = () => (
   <Icon>
     <path d="M13 4.5 H6.5 A1.5 1.5 0 0 0 5 6 V18 A1.5 1.5 0 0 0 6.5 19.5 H17 A1.5 1.5 0 0 0 18.5 18 V12.5" />
@@ -1486,6 +1491,7 @@ export default function App() {
 
   /** Documents opened with a password are treated as read-only: pdf-lib can't write back encrypted files */
   const readOnly = status === 'ready' && passwordRef.current !== undefined
+  const canEditAnnotations = editMode && !readOnly
 
   const clampScale = (s: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s))
 
@@ -1862,7 +1868,7 @@ export default function App() {
 
   const deleteSelected = () => {
     const sel = selected
-    if (!sel) return
+    if (!canEditAnnotations || !sel) return
     pushUndo()
     if (sel.kind === 'markup') setMarkups((prev) => prev.filter((m) => m.id !== sel.id))
     else if (sel.kind === 'drawing') setDrawings((prev) => prev.filter((d) => d.id !== sel.id))
@@ -2066,6 +2072,7 @@ export default function App() {
 
   /** Picking a draw tool leaves Edit PDF mode, so the two overlays never fight over the page */
   const toggleDrawTool = (tool: DrawTool) => {
+    setSelected(null)
     setEditMode(false)
     setDrawTool((v) => (v === tool ? null : tool))
   }
@@ -2169,6 +2176,9 @@ export default function App() {
       ])
     }
     setPendingSign(null)
+    setDrawTool(null)
+    setSelected(null)
+    setEditMode(true)
   }
 
   /** Export PNG: current page or all visible pages, 150dpi equivalent */
@@ -2856,12 +2866,7 @@ export default function App() {
         ...prev,
         { id, input: { kind: 'image', pageIndex: curOrigIdx, image: png.image, rect } },
       ])
-      // Selected on arrival, so the corner handles are right there for sizing
-      setSelected({
-        kind: 'drawing',
-        id,
-        ...popupPos(window.innerWidth / 2, window.innerHeight / 2),
-      })
+      setSelected(null)
       setEditMode(false)
     } catch (err) {
       opFailed(err instanceof Error ? err.message : String(err))
@@ -3125,7 +3130,7 @@ export default function App() {
       : null
 
   const copySelectedImage = async () => {
-    if (!selectedImage || selectedImage.input.kind !== 'image') return
+    if (!canEditAnnotations || !selectedImage || selectedImage.input.kind !== 'image') return
     try {
       const bytes = Uint8Array.from(atob(selectedImage.input.image), (char) => char.charCodeAt(0))
       await navigator.clipboard.write([
@@ -3220,7 +3225,8 @@ export default function App() {
       disabled: readOnly,
       run: () => {
         setDrawTool(null)
-        setEditMode((v) => !v)
+        setSelected(null)
+        setEditMode(true)
       },
     },
     {
@@ -3464,6 +3470,40 @@ export default function App() {
           {saveState === 'saved' && <span className="tb-save-ok">{t('savedOk')}</span>}
         </div>
         <div className="ribbon-body">
+          <div className="ribbon-mode-group">
+            <button
+              className={`rb-big${!editMode ? ' active' : ''}`}
+              title={t('selectMode')}
+              aria-pressed={!editMode}
+              onClick={() => {
+                setDrawTool(null)
+                setSelected(null)
+                setEditMode(false)
+              }}
+            >
+              <span className="rb-big-icon">
+                <IconSelect />
+              </span>
+              {t('selectMode')}
+            </button>
+            <button
+              className={`rb-big${editMode ? ' active' : ''}`}
+              title={t('editPdf')}
+              aria-pressed={editMode}
+              disabled={readOnly}
+              onClick={() => {
+                setDrawTool(null)
+                setSelected(null)
+                setEditMode(true)
+              }}
+            >
+              <span className="rb-big-icon">
+                <IconEditPdf />
+              </span>
+              {t('editPdf')}
+            </button>
+          </div>
+          <div className="ribbon-sep" />
           {ribbonTab === 'home' && (
             <>
               {/* Group 1: Assistant & Command Launcher */}
@@ -3543,20 +3583,6 @@ export default function App() {
               {/* Group 3: Quick Edit & Markup */}
               <div className="ribbon-group" onMouseDown={(e) => e.preventDefault()}>
                 <div className="ribbon-group-items">
-                  <button
-                    className={`rb-big${editMode ? ' active' : ''}`}
-                    disabled={readOnly}
-                    title={t('editPdf')}
-                    onClick={() => {
-                      setDrawTool(null)
-                      setEditMode((v) => !v)
-                    }}
-                  >
-                    <span className="rb-big-icon">
-                      <IconEditPdf />
-                    </span>
-                    {t('editPdf')}
-                  </button>
                   <button
                     className="rb-big"
                     disabled={readOnly || curOrigIdx < 0}
@@ -3745,20 +3771,6 @@ export default function App() {
               {/* Group 1: Direct Content Editing */}
               <div className="ribbon-group">
                 <div className="ribbon-group-items">
-                  <button
-                    className={`rb-big${editMode ? ' active' : ''}`}
-                    disabled={readOnly}
-                    title={t('editPdf')}
-                    onClick={() => {
-                      setDrawTool(null)
-                      setEditMode((v) => !v)
-                    }}
-                  >
-                    <span className="rb-big-icon">
-                      <IconEditPdf />
-                    </span>
-                    {t('editPdf')}
-                  </button>
                   <button
                     className={`rb-big${drawTool === 'freetext' ? ' active' : ''}`}
                     disabled={readOnly}
@@ -4786,7 +4798,7 @@ export default function App() {
             )}
             <div
               ref={scrollRef}
-              className={`pdf-scroll${drawTool ? ' pdf-drawing' : ''}${editMode ? ' pdf-editing' : ''}`}
+              className={`pdf-scroll${drawTool ? ' pdf-drawing' : ''}${canEditAnnotations ? ' pdf-editing' : ''}`}
               onScroll={() => {
                 handleScroll()
                 setSelPopup(null)
@@ -4854,9 +4866,13 @@ export default function App() {
                                   ...pdfRectToCss(geom, s.rect, scale),
                                   opacity: s.opacity ?? 1,
                                 }}
-                                onClick={(e) =>
-                                  setSelected({ kind: 'stamp', ...popupPos(e.clientX, e.clientY) })
-                                }
+                                onClick={(e) => {
+                                  if (canEditAnnotations)
+                                    setSelected({
+                                      kind: 'stamp',
+                                      ...popupPos(e.clientX, e.clientY),
+                                    })
+                                }}
                               />
                             ))}
                             {searchOpen && (
@@ -4880,11 +4896,13 @@ export default function App() {
                               scale={scale}
                               selectedId={selected?.kind === 'markup' ? selected.id : null}
                               selectTitle={t('removeMarkup')}
-                              onSelect={(id, x, y) =>
-                                setSelected({ kind: 'markup', id, ...popupPos(x, y) })
-                              }
+                              onSelect={(id, x, y) => {
+                                if (canEditAnnotations)
+                                  setSelected({ kind: 'markup', id, ...popupPos(x, y) })
+                              }}
                             />
                             <DrawLayer
+                              key={editMode ? 'edit' : 'select'}
                               geom={geom}
                               scale={scale}
                               pageWidth={size.width}
@@ -4895,16 +4913,18 @@ export default function App() {
                               strokeWidth={STROKE_WIDTH}
                               selectedId={selected?.kind === 'drawing' ? selected.id : null}
                               selectTitle={t('removeMarkup')}
+                              interactive={canEditAnnotations}
                               onCommit={(input) => commitDrawing(origIdx, input)}
                               onPlaceAt={(kind, at) => {
                                 setNoteText('')
                                 setNotePrompt({ kind, origIdx, at })
                               }}
-                              onSelect={(id, x, y) =>
-                                setSelected({ kind: 'drawing', id, ...popupPos(x, y) })
-                              }
-                              onMove={readOnly ? undefined : moveDrawing}
-                              onResize={readOnly ? undefined : resizeDrawing}
+                              onSelect={(id, x, y) => {
+                                if (canEditAnnotations)
+                                  setSelected({ kind: 'drawing', id, ...popupPos(x, y) })
+                              }}
+                              onMove={canEditAnnotations ? moveDrawing : undefined}
+                              onResize={canEditAnnotations ? resizeDrawing : undefined}
                               onEdit={(id) => {
                                 const d = drawings.find((x) => x.id === id)
                                 if (d?.input.kind === 'freetext') openFreetextEditor(d)
@@ -5024,7 +5044,7 @@ export default function App() {
                 </button>
               </div>
             )}
-            {selected && (
+            {canEditAnnotations && selected && (
               <div
                 className="pdf-del-popup"
                 style={{ left: selected.x, top: selected.y }}

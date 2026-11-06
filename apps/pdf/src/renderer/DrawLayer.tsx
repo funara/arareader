@@ -203,6 +203,7 @@ export function DrawLayer({
   strokeWidth,
   selectedId,
   selectTitle,
+  interactive,
   onCommit,
   onPlaceAt,
   onSelect,
@@ -220,6 +221,7 @@ export function DrawLayer({
   strokeWidth: number
   selectedId: string | null
   selectTitle: string
+  interactive: boolean
   onCommit: (input: DrawingInput) => void
   /** A placed annotation was requested; App collects its text and creates the annotation */
   onPlaceAt: (kind: 'note' | 'caret' | 'freetext', at: [number, number]) => void
@@ -523,13 +525,14 @@ export function DrawLayer({
               onPointerCancel={() => setDrag(null)}
               onDoubleClick={(e) => {
                 // Only a placed FreeText box is re-editable, and never while a tool is drawing
-                if (tool || d.input.kind !== 'freetext' || !onEdit) return
+                if (!interactive || tool || d.input.kind !== 'freetext' || !onEdit) return
                 // Keep the SVG's chain-finish double-click from also firing
                 e.stopPropagation()
                 onEdit(d.id)
               }}
               style={{
-                pointerEvents: tool ? 'none' : isImageDrawing(d.input) ? 'auto' : 'stroke',
+                pointerEvents:
+                  tool || !interactive ? 'none' : isImageDrawing(d.input) ? 'auto' : 'stroke',
               }}
             >
               <title>{selectTitle}</title>
@@ -625,7 +628,8 @@ export function DrawLayer({
                 top: isCaret ? vy - 10 : vy - 20,
                 background: cssRgb(point.color),
               }}
-              title={`${point.contents}\n\n${selectTitle}`}
+              title={interactive ? `${point.contents}\n\n${selectTitle}` : point.contents}
+              disabled={!interactive}
               onClick={(e) => onSelect(d.id, e.clientX, e.clientY)}
             >
               {isCaret ? (

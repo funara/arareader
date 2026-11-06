@@ -423,6 +423,19 @@ textarea {
   display: none;
 }
 
+.ribbon-mode-group {
+  position: sticky;
+  left: -10px;
+  z-index: 4;
+  display: flex;
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 0 4px 0 10px;
+  margin-left: -10px;
+  background: var(--surface);
+  border-right: 1px solid var(--border-subtle);
+}
+
 .ribbon-group {
   display: flex;
   flex-direction: column;
@@ -744,8 +757,12 @@ textarea {
   background-position: 0 46%;
 }
 
-.pdf-markup:hover {
+.pdf-editing .pdf-markup:hover {
   outline: 1px dashed rgba(0, 0, 0, 0.35);
+}
+
+.pdf-scroll:not(.pdf-editing) :is(.pdf-markup, .pdf-stamp-preview, .pdf-note-pin) {
+  pointer-events: none;
 }
 
 /* ---- Annotation Selection & Delete Popup ---- */
@@ -1601,10 +1618,14 @@ textarea {
 }
 
 .pdf-draw-shape {
+  cursor: pointer;
+}
+
+.pdf-editing .pdf-draw-shape {
   cursor: move;
 }
 
-.pdf-draw-shape:hover {
+.pdf-editing .pdf-draw-shape:hover {
   opacity: 0.65;
 }
 
@@ -1623,7 +1644,7 @@ textarea {
   padding: 0;
 }
 
-.pdf-note-pin:hover {
+.pdf-editing .pdf-note-pin:hover {
   opacity: 0.75;
 }
 
@@ -1787,7 +1808,7 @@ textarea {
   pointer-events: auto;
 }
 
-.pdf-stamp-preview:hover {
+.pdf-editing .pdf-stamp-preview:hover {
   outline: 1px dashed rgba(0, 0, 0, 0.35);
 }
 
