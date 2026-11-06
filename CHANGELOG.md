@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] - Unreleased
+
+### Added
+
+- **QR signatures:** Create a visible QR stamp containing the signer's name, local date and time with time-zone offset, intent, and recipient. Optionally combine it with the default saved primary signature and adjust the layout before placement.
+- **Read mode:** Focus on the document with the ribbon, footer, and panels hidden. Exiting restores the previous mode and panel layout, including unfinished text-edit drafts.
+- **Command Center:** Search commands and document text from one launcher with `Ctrl+K` (or `Cmd+K` on macOS). Animated hints describe the available searches.
+- **Document status:** The full-width footer shows the filename and save status even when the assistant panel is collapsed.
+
+### Changed
+
+- **Select, Edit, and Read modes:** Existing annotations are passive outside Edit, preventing accidental selection, movement, resizing, copying, or removal. Read is an interface mode, not a permanent PDF lock.
+- **Signatures and stamps:** Selected image stamps can be copied to the clipboard or removed in Edit mode, with undo available for removal.
+
+QR signatures and other visible signatures are **not cryptographic signatures**. The QR contains user-supplied information; it does not verify identity or protect the document from tampering.
+
 ## [0.1.0] - 2026-11-04
 
 ### Initial Standalone Release

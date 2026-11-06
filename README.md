@@ -48,7 +48,9 @@ updater point there.
 
 - PDF.js rendering with a selectable text layer, thumbnails, outline/bookmarks, and link handling.
 - Search with match navigation; zoom, fit width, fit page; continuous scrolling and a one- or two-page spread; keyboard page navigation.
-- Sidebar with thumbnails, outline, and comments; resizable and remembered widths.
+- **Command Center:** Find commands or search document text in one place with `Ctrl+K` (`Cmd+K` on macOS). Its launcher cycles through search hints.
+- **Read mode:** Hide the ribbon, footer, and panels for focused reading. Select **Read** on Home or View, then use **Exit Read mode** or `Esc` to restore the previous mode and panel layout; unfinished text edits are preserved. Read mode is an interface setting, not a permanent PDF lock.
+- Sidebar with thumbnails, outline, and comments; resizable and remembered widths. The Pages and ARA Assistant panels can be collapsed independently.
 - Print preview and printing.
 - Password-protected PDFs open **read-only**: write tools refuse rather than corrupt the file.
 - Autosave every 30 seconds and on window blur while the document is dirty.
@@ -57,9 +59,10 @@ updater point there.
 
 - **Markup:** highlight, underline, strikeout, squiggly.
 - **Drawing:** ink, rectangle, ellipse, line, arrow, polyline, polygon, caret, typewriter text, note.
-- **Comments:** panel with file-side annotation matching and delete.
+- **Comments:** panel with file-side annotation matching and delete. Existing annotations are passive outside **Edit** mode, avoiding accidental selection, movement, resizing, copying, or removal.
 - **Forms:** text, checkbox, radio, and choice fields; values are written on save.
-- **Signatures and stamps:** image stamps placed as Stamp annotations (image stamps, not cryptographic signatures).
+- **Signatures and stamps:** Place drawn signatures as ink annotations or image and QR signatures as Stamp annotations. QR Signature includes the signer's name, local date and time with time-zone offset, intent, and recipient; optionally combine it with the default saved signature and adjust the preview before placing it. These are visible signatures, not cryptographic signatures: QR contents do not verify identity or protect against tampering.
+- **Image stamp actions:** Copy the selected stamp to the clipboard or remove it in Edit mode; removal can be undone.
 - **Metadata:** title, author, subject, keywords.
 - **Pages:** rotate, delete, reorder; extract a page range to a new PDF; insert another PDF after a page.
 - **Split:** into one file per range, every N pages, or per top-level bookmark.
@@ -78,6 +81,7 @@ updater point there.
 - UI language and theme (light/dark/system) persisted in `userData/app-settings.json`.
 - Application menu (File / Edit / View / Window / Help) with the usual accelerators: `Ctrl+O`, `Ctrl+S`, `Ctrl+Shift+S`, `Ctrl+P`, `Ctrl+W`.
 - Frameless window with custom minimize / maximize / close controls in the tab strip on Windows, hidden-inset title bar on macOS.
+- Full-width document footer with filename and save status, including when the assistant panel is collapsed.
 - About card with version, license, and repository link.
 
 ### AI copilot
@@ -150,17 +154,16 @@ Network communication is strictly gated and limited to explicit, user-initiated 
 
 ## Downloads and installers
 
-| Platform | Target         | Status on this repo                                                                                                                                                    |
-| -------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows  | NSIS (x64)     | **Built**: `apps/desktop/release/ARAReader.Setup.0.1.0.exe` (per-user install, choosable directory, desktop + Start-menu shortcuts, registers the `.pdf` association). |
-| macOS    | DMG + ZIP      | Configured in `apps/desktop/electron-builder.cjs`; must be built on macOS.                                                                                             |
-| Linux    | AppImage + deb | Configured in `apps/desktop/electron-builder.cjs`; must be built on Linux.                                                                                             |
+| Platform | Target         | Configuration                                                                                             |
+| -------- | -------------- | --------------------------------------------------------------------------------------------------------- |
+| Windows  | NSIS (x64)     | Expected installer: `apps/desktop/release/ARAReader.Setup.0.2.0.exe` (per-user, with `.pdf` association). |
+| macOS    | DMG + ZIP      | Configured in `apps/desktop/electron-builder.cjs`; must be built on macOS.                                |
+| Linux    | AppImage + deb | Configured in `apps/desktop/electron-builder.cjs`; must be built on Linux.                                |
 
-Release artifacts are published to **GitHub Releases at
-[`funara/arareader`](https://github.com/funara/arareader/releases)**; the packaged
-app reads that repository from `resources/app-update.yml`. `v0.1.0` has not been
-published yet — see [docs/RELEASE.md](docs/RELEASE.md) for the checklist that
-produces and publishes it.
+Version 0.2.0 installers were not built as part of this preparation. Release
+artifacts are intended for [GitHub Releases](https://github.com/funara/arareader/releases);
+the packaged app reads that repository from `resources/app-update.yml`. See
+[docs/RELEASE.md](docs/RELEASE.md) for the release checklist.
 
 **Builds are unsigned.** There is no Authenticode certificate and no Apple
 Developer ID / notarization (`notarize: false`, `dmg.sign: false`). Windows
@@ -282,6 +285,7 @@ arareader/
 
 ## Documentation
 
+- [CHANGELOG.md](CHANGELOG.md) — version history and unreleased changes.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — process model, tab hosting, PDF
   module runtime, AI bridge and storage, security invariants, packaging and updates.
 - [docs/RELEASE.md](docs/RELEASE.md) — the exact release checklist (build, tag,
@@ -294,13 +298,13 @@ arareader/
 
 ---
 
-## Known limitations (v0.1.0)
+## Known limitations (v0.2.0)
 
 - macOS and Linux installers are configured but have not been built here; they
   must be produced on their own hosts.
 - No code signing or notarization.
 - No OCR: scanned/image-only PDFs have no text for the assistant or search.
-- "Signatures" are image stamps; there is no cryptographic signature validation or signing.
+- Signatures are visible annotations, not cryptographic signatures; there is no cryptographic signing or validation.
 - One attachment per chat.
 - The PDF view is translated into the locales shipped in `apps/pdf` (including
   CJK, RTL, and `zh-TW`); the Home screen and tab strip currently fall back to English.

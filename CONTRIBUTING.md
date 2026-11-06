@@ -121,7 +121,7 @@ fixes are cherry-picked into ARAOffice by hand, deliberately.
   uses `feat(ai)`, `feat(desktop)`, and similar scopes.
 - Do not commit build output: `out/`, `release/`, `dist/`, `*.exe`, `*.dmg`, test
   reports, and generated notices are ignored (or regenerated) on purpose.
-- Releases are maintainer-only. Tagging `v0.1.0`, building installers, and
+- Releases are maintainer-only. Tagging a version, building installers, and
   publishing to GitHub Releases happen **only** on an explicit human go-ahead —
   the exact procedure is [docs/RELEASE.md](docs/RELEASE.md). Never push, tag, or
   publish as part of an automated change.
