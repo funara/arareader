@@ -35,6 +35,12 @@ const api: PdfApi = {
   a11yCheck: (request) => ipcRenderer.invoke(PDF_CHANNELS.a11yCheck, request),
   a11yFix: (request) => ipcRenderer.invoke(PDF_CHANNELS.a11yFix, request),
   setDirty: (dirty) => ipcRenderer.send(PDF_CHANNELS.dirtyChanged, dirty),
+  setReadMode: (reading) => ipcRenderer.send(PDF_CHANNELS.readModeChanged, reading),
+  onExitReadMode: (handler) => {
+    const listener = () => handler()
+    ipcRenderer.on(PDF_CHANNELS.exitReadMode, listener)
+    return () => ipcRenderer.removeListener(PDF_CHANNELS.exitReadMode, listener)
+  },
   onCloseSaveRequest: (handler) => {
     const listener = () => handler()
     ipcRenderer.on(PDF_CHANNELS.closeSaveRequest, listener)

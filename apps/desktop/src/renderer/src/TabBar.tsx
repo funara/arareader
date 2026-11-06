@@ -298,6 +298,11 @@ export function TabBar({
       </div>
 
       <div className="tab-actions">
+        {tabs.some((tab) => tab.active && tab.reading) && (
+          <button className="tab-exit-read" onClick={() => void window.readerTabs.exitReadMode()}>
+            {t('exitReadMode')}
+          </button>
+        )}
         <button
           type="button"
           className="tab-theme-btn"

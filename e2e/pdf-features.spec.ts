@@ -185,6 +185,165 @@ test.describe('pdf features', () => {
   })
 })
 
+test('Read mode restores each PDF workspace and Command Center searches the document', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'arareader-read-mode-'))
+  const first = join(dir, 'first.pdf')
+  const second = join(dir, 'second.pdf')
+  const document = await PDFDocument.create()
+  const page = document.addPage([612, 792])
+  page.drawText('A unique searchable document phrase', { x: 70, y: 700 })
+  const field = document.getForm().createTextField('sample')
+  field.setText('original')
+  field.addToPage(page, { x: 70, y: 630, width: 160, height: 24 })
+  const bytes = await document.save()
+  await writeFile(first, bytes)
+  await writeFile(second, bytes)
+  const launched = await launchApp({ openFile: first })
+  try {
+    const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
+    const host = launched.page
+    const modes = pdf.locator('.ribbon-mode-group')
+    const command = pdf.getByRole('button', { name: 'Search commands or PDF…' })
+    const hints = command.locator('.ribbon-command-hints-track')
+    await expect(command).toBeVisible()
+    await expect(command).toHaveCSS('height', '28px')
+    await expect(hints.locator('span')).toHaveText([
+      'Search commands or PDF…',
+      'Find text in this PDF…',
+      'Find tools and actions…',
+      'Search commands or PDF…',
+    ])
+    await pdf.emulateMedia({ reducedMotion: 'reduce' })
+    await expect(hints).toHaveCSS('animation-name', 'none')
+    await expect(command).toHaveAccessibleName('Search commands or PDF…')
+    await pdf.emulateMedia({ reducedMotion: 'no-preference' })
+    await expect(hints).toHaveCSS('animation-name', 'ribbon-command-roll')
+    const offsets = await hints.evaluate((track) => {
+      const animation = track.getAnimations()[0]
+      animation.pause()
+      return [0, 3600, 7200, 10800].map((time) => {
+        animation.currentTime = time
+        return new DOMMatrixReadOnly(getComputedStyle(track).transform).m42
+      })
+    })
+    for (const [index, offset] of [0, -20, -40, 0].entries()) {
+      expect(offsets[index]).toBeCloseTo(offset, 1)
+    }
+    await hints.evaluate((track) => {
+      track.getAnimations()[0].currentTime = 3600
+    })
+    await pdf.screenshot({ path: screenshotPath('command-center-rolling') })
+    await hints.evaluate((track) => track.getAnimations()[0].play())
+    await expect(modes.locator('button')).toHaveCount(4)
+    await expect(modes.locator('button').first()).toHaveClass(/ai-entry/)
+    await expect(modes.locator('button').nth(1)).toHaveAttribute('title', 'Select')
+    await expect(modes.locator('button').nth(2)).toHaveAttribute('title', 'Edit PDF')
+    await expect(modes.locator('button').nth(3)).toHaveAttribute('title', 'Read mode')
+    await expect(modes.locator('button').nth(2)).toHaveText('Edit')
+    await expect(modes.locator('button').nth(3)).toHaveText('Read')
+    await modes.locator('.ai-entry').click()
+    await expect(pdf.locator('.ai-dock')).toHaveClass(/collapsed/)
+    await modes.locator('.ai-entry').click()
+    await expect(pdf.locator('.ai-dock')).not.toHaveClass(/collapsed/)
+    await expect(modes.locator('button[title="Select"]')).toHaveAttribute('aria-pressed', 'true')
+    await pdf.screenshot({ path: screenshotPath('production-modes-home') })
+    await pdf.emulateMedia({ colorScheme: 'dark' })
+    await expect(pdf.locator('html')).toHaveAttribute('data-theme', 'dark')
+    await pdf.screenshot({ path: screenshotPath('command-center-dark') })
+    await pdf.emulateMedia({ colorScheme: 'light' })
+    await expect(pdf.locator('html')).toHaveAttribute('data-theme', 'light')
+    const originalViewport = await pdf.evaluate(() => ({
+      width: window.innerWidth,
+      height: window.innerHeight,
+    }))
+    await pdf.setViewportSize({ width: 320, height: 800 })
+    await expect(command).toBeInViewport()
+    await expect(command.locator('.ribbon-command-hints')).toBeHidden()
+    await expect(command).toHaveAccessibleName('Search commands or PDF…')
+    await pdf.screenshot({ path: screenshotPath('command-center-narrow') })
+    await modes.locator('button[title="Read mode"]').scrollIntoViewIfNeeded()
+    await expect(modes.locator('button[title="Read mode"]')).toBeInViewport()
+    await modes.locator('.ai-entry').scrollIntoViewIfNeeded()
+    await expect(modes.locator('.ai-entry')).toBeInViewport()
+    await pdf.setViewportSize(originalViewport)
+    await pdf
+      .locator('.ribbon-tab')
+      .filter({ hasText: /^View$/ })
+      .click()
+    await expect(modes.locator('button')).toHaveCount(3)
+    await expect(modes.locator('button').nth(1)).toHaveText('Edit')
+    await expect(modes.locator('button').nth(2)).toHaveText('Read')
+    await pdf
+      .locator('.ribbon-tab')
+      .filter({ hasText: /^Edit$/ })
+      .click()
+    await expect(modes).toHaveCount(0)
+    await pdf
+      .locator('.ribbon-tab')
+      .filter({ hasText: /^Home$/ })
+      .click()
+    await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
+    await expect(host.locator('.tab-exit-read')).toBeVisible()
+    await host.locator('.tab-exit-read').click()
+    await expect(modes.locator('button[title="Select"]')).toHaveAttribute('aria-pressed', 'true')
+    await expect(pdf.locator('.pdf-sidebar-toggle')).toHaveAttribute('aria-expanded', 'true')
+    await expect(pdf.locator('.ai-dock')).not.toHaveClass(/collapsed/)
+
+    await command.click()
+    await expect(command).toHaveAttribute('aria-expanded', 'true')
+    await expect(hints).toHaveCSS('animation-play-state', 'paused')
+    const input = pdf.locator('.pdf-palette-input')
+    await input.press('Escape')
+    await expect(pdf.locator('.ribbon-command')).toBeFocused()
+    await pdf.locator('.ribbon-command').click()
+    await input.fill('unique searchable')
+    await expect(pdf.locator('.pdf-palette-row')).toHaveCount(1)
+    await expect(pdf.locator('.pdf-palette-row')).toContainText('Search in document')
+    await input.press('Enter')
+    await expect(pdf.locator('.pdf-search-input')).toHaveValue('unique searchable')
+    await expect(pdf.locator('.pdf-search-input')).toBeFocused()
+    await expect(pdf.locator('.pdf-search-hit').first()).toBeVisible()
+    await pdf.keyboard.press('Escape')
+
+    await pdf.locator('.ribbon-mode-group button[title="Edit PDF"]').click()
+    await expect(pdf.locator('.pdf-content-block').first()).toBeVisible()
+    const sidebar = pdf.locator('.pdf-sidebar-toggle')
+    await sidebar.click()
+    await expect(sidebar).toHaveAttribute('aria-expanded', 'false')
+    await expect(pdf.locator('.status-file .ribbon-file')).toHaveText('first.pdf')
+    await pdf.locator('.ai-entry').first().click()
+    await expect(pdf.locator('.ai-dock')).toHaveClass(/collapsed/)
+    await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
+    await expect(pdf.locator('.ribbon')).toBeHidden()
+    await expect(pdf.locator('.ai-dock')).toBeHidden()
+    await expect(pdf.locator('.status-bar')).toBeHidden()
+    await expect(pdf.locator('.pdf-form-input').first()).toBeDisabled()
+    await expect(pdf.locator('.pdf-content-block')).toHaveCount(0)
+    await expect(host.locator('.tab-exit-read')).toBeVisible()
+    await pdf.screenshot({ path: screenshotPath('production-read-content') })
+    await host.screenshot({ path: screenshotPath('production-read-header') })
+
+    await host.evaluate((path) => window.reader.openPath(path), second)
+    await expect(host.locator('.tab-item', { hasText: 'second.pdf' })).toBeVisible()
+    await expect(host.locator('.tab-exit-read')).toHaveCount(0)
+    await host.locator('.tab-item', { hasText: 'first.pdf' }).click()
+    await expect(host.locator('.tab-exit-read')).toBeVisible()
+    await host.locator('.tab-exit-read').click()
+    await expect(pdf.locator('.ribbon')).toBeVisible()
+    await expect(pdf.locator('.pdf-form-input').first()).toBeEnabled()
+    await expect(pdf.locator('.pdf-content-block').first()).toBeVisible()
+    await expect(pdf.locator('.ribbon-mode-group button[title="Edit PDF"]')).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    await expect(sidebar).toHaveAttribute('aria-expanded', 'false')
+    await expect(pdf.locator('.ai-dock')).toHaveClass(/collapsed/)
+    await expect(pdf.locator('.status-file .ribbon-file')).toHaveText('first.pdf')
+  } finally {
+    await closeReader(launched)
+  }
+})
+
 test('QR Digital signature uses the profile and survives saving', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'arareader-qr-'))
   const path = join(dir, 'document.pdf')
@@ -227,7 +386,7 @@ test('QR Digital signature uses the profile and survives saving', async () => {
     await expect(selectMode).toHaveAttribute('aria-pressed', 'false')
     await pdf
       .locator('.ribbon-tab')
-      .filter({ hasText: /^Edit$/ })
+      .filter({ hasText: /^View$/ })
       .click()
     await expect(selectMode).toBeVisible()
     await expect(editMode).toBeVisible()
@@ -278,7 +437,14 @@ test('QR Digital signature uses the profile and survives saving', async () => {
       .click({ position: { x: 250, y: 250 } })
     await expect(editMode).toHaveAttribute('aria-pressed', 'true')
     await expect(selectMode).toHaveAttribute('aria-pressed', 'false')
-    await expect(pdf.locator('.tb-save-pending')).toBeVisible()
+    await expect(pdf.locator('.status-file .tb-save-pending')).toBeVisible()
+    await pdf.locator('.ai-entry').first().click()
+    await expect(pdf.locator('.status-file .tb-save-pending')).toBeVisible()
+    await pdf.setViewportSize({ width: 620, height: 800 })
+    await expect(pdf.locator('.status-file .tb-save-pending')).toBeInViewport()
+    await pdf.screenshot({ path: screenshotPath('production-narrow-unsaved') })
+    await pdf.setViewportSize(viewport)
+    await pdf.locator('.ai-entry').first().click()
     await pdf.keyboard.press(process.platform === 'darwin' ? 'Meta+s' : 'Control+s')
     await expect
       .poll(
@@ -301,10 +467,12 @@ test('QR Digital signature uses the profile and survives saving', async () => {
       .first()
       .screenshot({ path: screenshotPath('pdf-qr-saved') })
     const image = await loadImage(screenshot)
-    const canvas = createCanvas(image.width, image.height)
+    // Preserve the on-screen pixels while giving the decoder enough sampling resolution.
+    const canvas = createCanvas(image.width * 2, image.height * 2)
     const context = canvas.getContext('2d')
-    context.drawImage(image, 0, 0)
-    const pixels = context.getImageData(0, 0, image.width, image.height)
+    context.imageSmoothingEnabled = false
+    context.drawImage(image, 0, 0, canvas.width, canvas.height)
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height)
     const decoded = jsQR(pixels.data, pixels.width, pixels.height)?.data
     expect(decoded).toContain(`Signed by: ${name}\n`)
     expect(decoded).toContain(`Intent: ${'Approval '.repeat(6).trim()}\n`)
@@ -789,8 +957,8 @@ for (const kind of ['strokes', 'image'] as const) {
       const editButton = pdf.locator('.ribbon-mode-group button[title="Edit PDF"]')
       const selectButton = pdf.locator('.ribbon-mode-group button[title="Select"]')
       await expect(editButton).toHaveAttribute('aria-pressed', 'true')
-      await selectButton.click()
       const shape = pdf.locator('.pdf-draw-shape').first()
+      await selectButton.click()
       const beforeSelectDrag = (await shape.boundingBox())!
       await pdf.mouse.move(beforeSelectDrag.x + 10, beforeSelectDrag.y + 10)
       expect(await shape.evaluate((el) => getComputedStyle(el).opacity)).toBe('1')
@@ -850,6 +1018,14 @@ for (const kind of ['strokes', 'image'] as const) {
       await expect(pdf.locator('.pdf-draw-shape')).toHaveCount(0)
       await pdf.locator('.pdf-toast').getByRole('button', { name: 'Undo' }).click()
       await expect(pdf.locator('.pdf-draw-shape')).toHaveCount(1)
+      await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
+      await expect(launched.page.locator('.tab-exit-read')).toBeVisible()
+      await pdf.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z')
+      await expect(shape).toHaveCount(1)
+      await shape.click({ force: true })
+      await expect(pdf.locator('.pdf-del-popup')).toHaveCount(0)
+      await launched.page.locator('.tab-exit-read').click()
+      await expect(editButton).toHaveAttribute('aria-pressed', 'true')
       await expect(pdf.locator('.tb-save-pending')).toBeVisible()
       await pdf.keyboard.press(process.platform === 'darwin' ? 'Meta+s' : 'Control+s')
       await expect(pdf.locator('.tb-save-pending')).toHaveCount(0, { timeout: 20000 })
@@ -877,6 +1053,7 @@ test.describe('direct content editing', () => {
     const first = document.addPage([612, 792])
     const font = await document.embedFont(StandardFonts.Helvetica)
     first.drawText('Hello world', { x: 72, y: 650, size: 24, font })
+    for (let i = 0; i < 8; i++) document.addPage([612, 792])
     await writeFile(path, await document.save())
 
     const launched = await launchApp({ openFile: path })
@@ -900,6 +1077,20 @@ test.describe('direct content editing', () => {
       await expect(editor).toBeVisible()
       await expect(editor).toHaveValue('Hello world')
       await editor.fill('Edited text')
+      await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
+      await expect(editor).toHaveCount(0)
+      await expect(page.locator('.tab-exit-read')).toBeVisible()
+      const scroll = pdf.locator('.pdf-scroll')
+      await scroll.evaluate((el) => {
+        el.scrollTop = el.scrollHeight
+      })
+      await expect(pdf.locator('.pdf-row').last()).toBeInViewport()
+      await scroll.evaluate((el) => {
+        el.scrollTop = 0
+      })
+      await expect(pdf.locator('.pdf-row').first()).toBeInViewport()
+      await page.locator('.tab-exit-read').click()
+      await expect(editor).toHaveValue('Edited text')
       await editor.press('Enter')
       await expect(pdf.locator('.pdf-content-edit-img')).toHaveCount(1)
 
@@ -1001,9 +1192,10 @@ test.describe('organize, palette and external rebuilds', () => {
       const input = palette.locator('.pdf-palette-input')
       await expect(input).toBeFocused()
 
-      // Filtering is case-insensitive on the label; Enter runs the single remaining row
+      // Matching actions and document search are both available for the same query.
       await input.fill('edit pdf')
-      await expect(palette.locator('.pdf-palette-row')).toHaveCount(1)
+      await expect(palette.locator('.pdf-palette-row')).toHaveCount(2)
+      await expect(palette.locator('.pdf-palette-row').last()).toContainText('Search in document')
       await input.press('Enter')
       await expect(palette).toHaveCount(0)
 

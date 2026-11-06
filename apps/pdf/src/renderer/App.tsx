@@ -490,6 +490,12 @@ const IconSpread = () => (
     <rect x="13" y="6" width="6.5" height="12" rx="1" />
   </Icon>
 )
+const IconRead = () => (
+  <Icon>
+    <path d="M12 7 C10 5.4 7.5 5 4.5 5.5 V17 C7.5 16.5 10 17 12 18.5 C14 17 16.5 16.5 19.5 17 V5.5 C16.5 5 14 5.4 12 7 Z" />
+    <path d="M12 7 V18.5" />
+  </Icon>
+)
 const IconSinglePage = () => (
   <Icon>
     <rect x="6.81" y="4.5" width="10.38" height="15" rx="1.15" />
@@ -585,13 +591,6 @@ const IconOrganizeGrid = () => (
     <rect x="13.1" y="13.1" width="6.4" height="6.4" rx="1" />
   </Icon>
 )
-const IconCommandPalette = () => (
-  <Icon>
-    <rect x="3.5" y="5" width="17" height="14" rx="2.5" />
-    <path d="M7.6 9.9 L9.7 12 L7.6 14.1" />
-    <path d="M12.2 14.4 H16.4" />
-  </Icon>
-)
 const IconReload = () => (
   <Icon>
     <path d="M19.5 12 A7.5 7.5 0 1 1 12 4.5" />
@@ -641,6 +640,11 @@ const IconComments = () => (
 const IconDrawColor = () => (
   <Icon>
     <path d="M12 4.5 C14.2 7.3 17.25 9.2 17.25 12.4 C17.25 15.4 14.9 17.5 12 17.5 C9.1 17.5 6.75 15.4 6.75 12.4 C6.75 9.2 9.8 7.3 12 4.5 Z" />
+  </Icon>
+)
+const IconCommand = () => (
+  <Icon>
+    <path d="M5 7 L10 12 L5 17 M13 17 H19" />
   </Icon>
 )
 const IconSearch = () => (
@@ -1077,8 +1081,23 @@ export default function App() {
   const [drawTool, setDrawTool] = useState<DrawTool | null>(null)
   /** Direct text/image edits: an additive whiteout patch plus the replacement bitmap */
   const [pageEdits, setPageEdits] = useState<PageContentEdit[]>([])
+  const [draftPages, setDraftPages] = useState<Set<number>>(() => new Set())
+  const onDraftActivity = useCallback((pageIndex: number, active: boolean) => {
+    setDraftPages((pages) => {
+      if (pages.has(pageIndex) === active) return pages
+      const next = new Set(pages)
+      if (active) next.add(pageIndex)
+      else next.delete(pageIndex)
+      return next
+    })
+  }, [])
   /** Edit PDF mode: the page's own text lines and images become clickable/draggable */
   const [editMode, setEditMode] = useState(false)
+  const [readMode, setReadMode] = useState(false)
+  useEffect(() => {
+    window.pdfApi.setReadMode(readMode)
+  }, [readMode])
+  useEffect(() => window.pdfApi.onExitReadMode(() => setReadMode(false)), [])
   /** Hidden picker behind the ribbon's Add image buttons */
   const imageInputRef = useRef<HTMLInputElement>(null)
   const [drawColor, setDrawColor] = useState<[number, number, number]>(DRAW_COLORS[0]!.rgb)
@@ -1491,7 +1510,7 @@ export default function App() {
 
   /** Documents opened with a password are treated as read-only: pdf-lib can't write back encrypted files */
   const readOnly = status === 'ready' && passwordRef.current !== undefined
-  const canEditAnnotations = editMode && !readOnly
+  const canEditAnnotations = editMode && !readOnly && !readMode
 
   const clampScale = (s: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s))
 
@@ -1733,6 +1752,7 @@ export default function App() {
 
   /** Mouse released over selected text → show the markup bar centered above the selection box (below if it doesn't fit) */
   const handleMouseUp = () => {
+    if (readMode) return
     setTimeout(() => {
       const el = scrollRef.current
       const sel = window.getSelection()
@@ -2962,11 +2982,12 @@ export default function App() {
           void save()
         } else if (k === 'z') {
           e.preventDefault()
+          if (readMode) return
           if (e.shiftKey) redo()
           else undo()
         } else if (k === 'f') {
           e.preventDefault()
-          openSearch()
+          if (!readMode) openSearch()
         } else if (k === 'p' && !e.shiftKey) {
           e.preventDefault()
           void printDoc()
@@ -2980,7 +3001,7 @@ export default function App() {
           e.preventDefault()
           fitModeRef.current = 'width'
           recomputeFit()
-        } else if (k === 'k' && !inEditable) {
+        } else if (k === 'k' && !inEditable && !readMode) {
           // Leave the palette's own input alone: Ctrl/⌘K inside it must not close it
           e.preventDefault()
           setPaletteOpen((v) => !v)
@@ -2989,7 +3010,8 @@ export default function App() {
       }
       if (e.key === 'Escape') {
         // The palette swallows its own Escape; this covers a grid/dialog opened behind it
-        if (paletteOpen) setPaletteOpen(false)
+        if (readMode) setReadMode(false)
+        else if (paletteOpen) setPaletteOpen(false)
         else if (organizeOpen) setOrganizeOpen(false)
         else if (pendingSign) setPendingSign(null)
         else if (drawTool) setDrawTool(null)
@@ -3146,7 +3168,18 @@ export default function App() {
    * render — each row's closure carries the current undo stacks/doc/pending state, and the
    * palette owns filtering and the keyboard contract.
    */
+  const enterReadMode = () => {
+    setPendingSign(null)
+    setDrawTool(null)
+    setSelected(null)
+    setSelPopup(null)
+    setNotePrompt(null)
+    setSearchOpen(false)
+    setReadMode(true)
+  }
+
   const paletteCommands: PaletteCommand[] = [
+    { id: 'read-mode', label: t('readMode'), run: enterReadMode },
     {
       id: 'save',
       label: t('save'),
@@ -3372,7 +3405,7 @@ export default function App() {
   ]
 
   return (
-    <div className="app">
+    <div className={`app${readMode ? ' read-mode' : ''}`}>
       {/* Behind the ribbon's Add image buttons (Home and Comment), and reset after each read */}
       <input
         ref={imageInputRef}
@@ -3450,101 +3483,96 @@ export default function App() {
             {t('tabView')}
           </button>
           <span className="ribbon-tabs-spacer" />
-          <span className="ribbon-file" title={filePath}>
-            {fileName}
-          </span>
-          {readOnly && <span className="tb-readonly">{t('roEncrypted')}</span>}
-          {/* Unsaved-changes indicator next to the file name: the file on disk
-              is only touched by an explicit save until then */}
-          {saveState === 'saving' ? (
-            <span className="tb-save-pending">{t('saving')}</span>
-          ) : (
-            dirty &&
-            saveState !== 'error' && <span className="tb-save-pending">{t('unsaved')}</span>
-          )}
-          {saveState === 'error' && (
-            <span className="tb-save-error" title={saveError}>
-              {t('saveFailed')}
+          <button
+            className="ribbon-command"
+            title={`${t('commandPalette')} (${kbdHint('K')})`}
+            aria-label={t('commandSearchHint')}
+            aria-haspopup="dialog"
+            aria-expanded={paletteOpen}
+            onClick={() => setPaletteOpen(true)}
+          >
+            <IconCommand />
+            <span className="ribbon-command-hints" aria-hidden="true">
+              <span className="ribbon-command-hints-track">
+                <span>{t('commandSearchHint')}</span>
+                <span>{t('commandFindTextHint')}</span>
+                <span>{t('commandFindToolsHint')}</span>
+                <span>{t('commandSearchHint')}</span>
+              </span>
             </span>
-          )}
-          {saveState === 'saved' && <span className="tb-save-ok">{t('savedOk')}</span>}
+            <kbd aria-hidden="true">{kbdHint('K')}</kbd>
+          </button>
         </div>
         <div className="ribbon-body">
-          <div className="ribbon-mode-group">
-            <button
-              className={`rb-big${!editMode ? ' active' : ''}`}
-              title={t('selectMode')}
-              aria-pressed={!editMode}
-              onClick={() => {
-                setDrawTool(null)
-                setSelected(null)
-                setEditMode(false)
-              }}
-            >
-              <span className="rb-big-icon">
-                <IconSelect />
-              </span>
-              {t('selectMode')}
-            </button>
-            <button
-              className={`rb-big${editMode ? ' active' : ''}`}
-              title={t('editPdf')}
-              aria-pressed={editMode}
-              disabled={readOnly}
-              onClick={() => {
-                setDrawTool(null)
-                setSelected(null)
-                setEditMode(true)
-              }}
-            >
-              <span className="rb-big-icon">
-                <IconEditPdf />
-              </span>
-              {t('editPdf')}
-            </button>
-          </div>
-          <div className="ribbon-sep" />
-          {ribbonTab === 'home' && (
+          {(ribbonTab === 'home' || ribbonTab === 'view') && (
             <>
-              {/* Group 1: Assistant & Command Launcher */}
-              <div className="ribbon-group">
-                <div className="ribbon-group-items">
-                  <button
-                    className={`rb-big ai-entry${aiCollapsed ? '' : ' active'}`}
-                    title={t('aiOpenAssistant')}
-                    onClick={() => setAiCollapsed((v) => !v)}
-                  >
-                    <span className="rb-big-icon">
-                      <AssistantMark size={26} />
-                    </span>
-                    <span>ARA Assistant</span>
-                  </button>
-                  <button
-                    className="rb-big"
-                    title={`${t('commandPalette')} (${kbdHint('K')})`}
-                    onClick={() => setPaletteOpen(true)}
-                  >
-                    <span className="rb-big-icon">
-                      <IconCommandPalette />
-                    </span>
-                    {t('commandPalette')}
-                  </button>
-                </div>
+              <div className="ribbon-mode-group">
+                {ribbonTab === 'home' && (
+                  <>
+                    <button
+                      className={`rb-big ai-entry${aiCollapsed ? '' : ' active'}`}
+                      title={t('aiOpenAssistant')}
+                      onClick={() => setAiCollapsed((v) => !v)}
+                    >
+                      <span className="rb-big-icon">
+                        <AssistantMark size={26} />
+                      </span>
+                      <span>ARA Assistant</span>
+                    </button>
+                    <div className="ribbon-sep" />
+                  </>
+                )}
+                <button
+                  className={`rb-big${!editMode ? ' active' : ''}`}
+                  title={t('selectMode')}
+                  aria-pressed={!editMode}
+                  onClick={() => {
+                    setDrawTool(null)
+                    setSelected(null)
+                    setEditMode(false)
+                  }}
+                >
+                  <span className="rb-big-icon">
+                    <IconSelect />
+                  </span>
+                  {t('selectMode')}
+                </button>
+                <button
+                  className={`rb-big${editMode ? ' active' : ''}`}
+                  title={t('editPdf')}
+                  aria-pressed={editMode}
+                  disabled={readOnly}
+                  onClick={() => {
+                    setDrawTool(null)
+                    setSelected(null)
+                    setEditMode(true)
+                  }}
+                >
+                  <span className="rb-big-icon">
+                    <IconEditPdf />
+                  </span>
+                  {t('editModeLabel')}
+                </button>
+                <button
+                  className="rb-big"
+                  title={t('readMode')}
+                  aria-pressed={readMode}
+                  onClick={enterReadMode}
+                >
+                  <span className="rb-big-icon">
+                    <IconRead />
+                  </span>
+                  {t('readModeLabel')}
+                </button>
               </div>
               <div className="ribbon-sep" />
-              {/* Group 2: Find & Navigate */}
+            </>
+          )}
+          {ribbonTab === 'home' && (
+            <>
+              {/* Group 1: Find & Navigate */}
               <div className="ribbon-group">
                 <div className="ribbon-group-items">
-                  <button
-                    className={`rb-big${searchOpen ? ' active' : ''}`}
-                    title={`${t('search')} (${kbdHint('F')})`}
-                    onClick={() => (searchOpen ? closeSearch() : openSearch())}
-                  >
-                    <span className="rb-big-icon">
-                      <IconSearch />
-                    </span>
-                    {t('search')}
-                  </button>
                   <button
                     className={`rb-big${sidebar === 'thumbs' ? ' active' : ''}`}
                     title={t('thumbs')}
@@ -4796,6 +4824,15 @@ export default function App() {
             {(sidebar === 'thumbs' || (sidebar === 'outline' && !!outline)) && (
               <div className="pdf-side-resizer" onPointerDown={startSidebarResize} />
             )}
+            <button
+              className="pdf-sidebar-toggle"
+              aria-label={t('thumbs')}
+              aria-expanded={sidebar !== null}
+              title={t('thumbs')}
+              onClick={() => setSidebar((current) => (current ? null : 'thumbs'))}
+            >
+              <IconThumbs />
+            </button>
             <div
               ref={scrollRef}
               className={`pdf-scroll${drawTool ? ' pdf-drawing' : ''}${canEditAnnotations ? ' pdf-editing' : ''}`}
@@ -4930,16 +4967,23 @@ export default function App() {
                                 if (d?.input.kind === 'freetext') openFreetextEditor(d)
                               }}
                             />
-                            <EditPdfLayer
-                              doc={doc}
-                              pageNo={origIdx + 1}
-                              geom={geom}
-                              scale={scale}
-                              editMode={editMode}
-                              edits={pageEdits.filter((e) => e.pageIndex === origIdx)}
-                              readOnly={readOnly}
-                              onCommit={commitContentEdit}
-                            />
+                          </>
+                        )}
+                        {(rowVisible || draftPages.has(origIdx)) && (
+                          <EditPdfLayer
+                            doc={doc}
+                            pageNo={origIdx + 1}
+                            geom={geom}
+                            scale={scale}
+                            editMode={editMode}
+                            edits={pageEdits.filter((e) => e.pageIndex === origIdx)}
+                            readOnly={readOnly || readMode}
+                            onCommit={commitContentEdit}
+                            onDraftActivity={onDraftActivity}
+                          />
+                        )}
+                        {rowVisible && (
+                          <>
                             <LinkLayer
                               doc={doc}
                               pageNo={origIdx + 1}
@@ -4952,7 +4996,7 @@ export default function App() {
                               pageNo={origIdx + 1}
                               geom={geom}
                               scale={scale}
-                              readOnly={readOnly}
+                              readOnly={readOnly || readMode}
                               edits={formEdits}
                               onEdit={(v2) => {
                                 pushUndo(`form:${v2.name}`)
@@ -5500,42 +5544,54 @@ export default function App() {
               </DraggableModal>
             )}
           </div>
-
-          <footer className="status-bar">
-            <div className="status-left">
-              <span className="status-item">
-                {t('appPageOf', { current: currentPage, total: pageCount })}
-              </span>
-            </div>
-            <div className="status-right">
-              <button
-                className="zoom-btn"
-                title={`${t('zoomOut')} (${kbdHint('-')})`}
-                onClick={zoomOut}
-              >
-                −
-              </button>
-              <input
-                className="zoom-slider"
-                type="range"
-                min={MIN_SCALE * 100}
-                max={MAX_SCALE * 100}
-                step={5}
-                value={Math.round(scale * 100)}
-                onChange={(e) => applyScale(Number(e.target.value) / 100, null)}
-              />
-              <button
-                className="zoom-btn"
-                title={`${t('zoomIn')} (${kbdHint('+')})`}
-                onClick={zoomIn}
-              >
-                +
-              </button>
-              <span className="zoom-value">{Math.round(scale * 100)}%</span>
-            </div>
-          </footer>
         </div>
       </div>
+      <footer className="status-bar">
+        <div className="status-left">
+          <span className="status-item">
+            {t('appPageOf', { current: currentPage, total: pageCount })}
+          </span>
+        </div>
+        <div className="status-right">
+          <button
+            className="zoom-btn"
+            title={`${t('zoomOut')} (${kbdHint('-')})`}
+            onClick={zoomOut}
+          >
+            −
+          </button>
+          <input
+            className="zoom-slider"
+            type="range"
+            min={MIN_SCALE * 100}
+            max={MAX_SCALE * 100}
+            step={5}
+            value={Math.round(scale * 100)}
+            onChange={(e) => applyScale(Number(e.target.value) / 100, null)}
+          />
+          <button className="zoom-btn" title={`${t('zoomIn')} (${kbdHint('+')})`} onClick={zoomIn}>
+            +
+          </button>
+          <span className="zoom-value">{Math.round(scale * 100)}%</span>
+        </div>
+        <div className="status-file">
+          <span className="ribbon-file" title={filePath}>
+            {fileName}
+          </span>
+          {readOnly && <span className="tb-readonly">{t('roEncrypted')}</span>}
+          {saveState === 'saving' ? (
+            <span className="tb-save-pending">{t('saving')}</span>
+          ) : dirty && saveState !== 'error' ? (
+            <span className="tb-save-pending">{t('unsaved')}</span>
+          ) : null}
+          {saveState === 'error' && (
+            <span className="tb-save-error" title={saveError}>
+              {t('saveFailed')}
+            </span>
+          )}
+          {saveState === 'saved' && <span className="tb-save-ok">{t('savedOk')}</span>}
+        </div>
+      </footer>
       {showPrintPreview && doc && (
         <PdfPrintPreview
           doc={doc}
@@ -5571,6 +5627,10 @@ export default function App() {
       <CommandPalette
         open={paletteOpen}
         commands={paletteCommands}
+        onSearchDocument={(query) => {
+          setSearchQuery(query)
+          openSearch()
+        }}
         onClose={() => setPaletteOpen(false)}
       />
     </div>

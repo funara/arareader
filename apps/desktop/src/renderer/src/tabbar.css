@@ -386,6 +386,22 @@
   -webkit-app-region: no-drag;
 }
 
+.tab-exit-read {
+  align-self: center;
+  margin-right: 6px;
+  padding: 5px 9px;
+  border: 1px solid var(--tb-border);
+  border-radius: 6px;
+  background: var(--tb-active-bg);
+  color: var(--tb-text-active);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tab-exit-read:focus-visible {
+  outline: 2px solid var(--tb-accent);
+}
+
 .tab-theme-btn {
   -webkit-app-region: no-drag;
   width: 30px;

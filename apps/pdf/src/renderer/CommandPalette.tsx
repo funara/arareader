@@ -23,10 +23,12 @@ const MAX_ROWS = 12
 export function CommandPalette({
   open,
   commands,
+  onSearchDocument,
   onClose,
 }: {
   open: boolean
   commands: PaletteCommand[]
+  onSearchDocument: (query: string) => void
   onClose: () => void
 }): ReactElement | null {
   const [query, setQuery] = useState('')
@@ -37,9 +39,15 @@ export function CommandPalette({
   // Opening always starts from a clean slate and takes focus
   useEffect(() => {
     if (!open) return
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
     setQuery('')
     setActive(0)
     inputRef.current?.focus()
+    return () => {
+      window.setTimeout(() => {
+        if (document.activeElement === document.body && previous?.isConnected) previous.focus()
+      }, 0)
+    }
   }, [open])
 
   const matches = useMemo(() => {
@@ -50,7 +58,18 @@ export function CommandPalette({
         c.label.toLowerCase().includes(q) || (c.hint ? c.hint.toLowerCase().includes(q) : false),
     )
   }, [commands, query])
-  const rows = matches.slice(0, MAX_ROWS)
+  const searchTerm = query.trim()
+  const searchRow: PaletteCommand | null = searchTerm
+    ? {
+        id: 'search-document',
+        label: `${t('searchDocument')}: “${searchTerm}”`,
+        run: () => onSearchDocument(searchTerm),
+      }
+    : null
+  const rows = [
+    ...matches.slice(0, MAX_ROWS - (searchRow ? 1 : 0)),
+    ...(searchRow ? [searchRow] : []),
+  ]
 
   // Filtering moves the highlight back to the top match
   useEffect(() => {
@@ -164,7 +183,7 @@ export function CommandPalette({
               aria-selected={i === activeIdx}
               // True match count, so "3 of 41" stays honest when the list is capped
               aria-posinset={i + 1}
-              aria-setsize={matches.length}
+              aria-setsize={matches.length + (searchRow ? 1 : 0)}
               // Combobox pattern: focus stays in the input, the active row is announced
               tabIndex={-1}
               className={`pdf-palette-row${i === activeIdx ? ' pdf-palette-active' : ''}`}

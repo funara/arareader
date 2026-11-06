@@ -50,6 +50,8 @@ export const PDF_CHANNELS = {
   sanitizePreview: 'pdf:sanitize-preview',
   deleteAnnotations: 'pdf:delete-annotations',
   dirtyChanged: 'pdf:dirty-changed',
+  readModeChanged: 'pdf:read-mode-changed',
+  exitReadMode: 'pdf:exit-read-mode',
   closeSaveRequest: 'pdf:close-save-request',
   closeSaveResult: 'pdf:close-save-result',
   getLanguage: 'app:get-language',
@@ -566,6 +568,8 @@ export interface PdfApi {
   deleteAnnotations(request: DeleteAnnotationsRequest): Promise<DeleteAnnotationsResult>
   /** Mirror unsaved-changes state to the main process; drives the save prompt before closing a tab/window */
   setDirty(dirty: boolean): void
+  setReadMode(reading: boolean): void
+  onExitReadMode(handler: () => void): () => void
   /** Main process picked "Save" in the close prompt → renderer saves and replies via sendCloseSaveResult */
   onCloseSaveRequest(handler: () => void): () => void
   sendCloseSaveResult(ok: boolean): void

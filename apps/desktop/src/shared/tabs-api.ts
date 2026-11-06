@@ -10,6 +10,7 @@ export interface TabSummary {
   title: string
   closable: boolean
   active: boolean
+  reading?: boolean
 }
 
 export interface TabsApi {
@@ -18,6 +19,7 @@ export interface TabsApi {
   close(id: string): Promise<void>
   /** move a tab to a new index in the strip; Home stays pinned at index 0 */
   reorder(id: string, toIndex: number): Promise<void>
+  exitReadMode(): Promise<void>
   /** subscribe to tab list changes (open/close/activate/title updates); returns unsubscribe */
   onChanged(handler: (tabs: TabSummary[]) => void): () => void
 }
@@ -27,5 +29,6 @@ export const TABS_CHANNELS = {
   activate: 'tabs:activate',
   close: 'tabs:close',
   reorder: 'tabs:reorder',
+  exitReadMode: 'tabs:exit-read-mode',
   changed: 'tabs:changed',
 } as const

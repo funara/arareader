@@ -24,6 +24,7 @@ const en = {
   version: 'Version {v}',
   switchToLight: 'Switch to light mode',
   switchToDark: 'Switch to dark mode',
+  exitReadMode: 'Exit Read mode',
   minimize: 'Minimize',
   maximize: 'Maximize',
   restore: 'Restore',

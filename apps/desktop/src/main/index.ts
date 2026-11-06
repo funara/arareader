@@ -569,6 +569,12 @@ function registerHomeIpc(): void {
 }
 
 function registerTabsIpc(): void {
+  ipcMain.on(PDF_CHANNELS.readModeChanged, (event, reading: unknown) => {
+    if (typeof reading === 'boolean') tabManager?.setReadingFor(event.sender.id, reading)
+  })
+  ipcMain.handle(TABS_CHANNELS.exitReadMode, (event: IpcMainInvokeEvent) => {
+    if (event.sender === mainWindow?.webContents) tabManager?.exitActiveReadMode()
+  })
   ipcMain.handle(TABS_CHANNELS.list, () => tabManager?.list() ?? [])
   ipcMain.handle(TABS_CHANNELS.activate, (_event: IpcMainInvokeEvent, id: unknown) => {
     if (typeof id === 'string') tabManager?.activateTab(id)

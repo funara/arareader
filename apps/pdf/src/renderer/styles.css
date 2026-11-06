@@ -317,7 +317,8 @@ textarea {
 }
 
 .ribbon-file {
-  max-width: 42%;
+  min-width: 0;
+  max-width: 100%;
   font-size: 11.5px;
   font-family: var(--font-mono);
   color: var(--text-muted);
@@ -329,6 +330,106 @@ textarea {
 
 .ribbon-tabs-spacer {
   flex: 1;
+}
+
+.ribbon-command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 280px;
+  min-width: 36px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.ribbon-command svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.ribbon-command-hints {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  overflow: hidden;
+  text-align: start;
+}
+.ribbon-command-hints-track {
+  display: block;
+  animation: ribbon-command-roll 10.8s infinite;
+}
+.ribbon-command-hints-track > span {
+  display: block;
+  height: 20px;
+  line-height: 20px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ribbon-command:hover .ribbon-command-hints-track,
+.ribbon-command:focus-within .ribbon-command-hints-track,
+.ribbon-command[aria-expanded='true'] .ribbon-command-hints-track {
+  animation-play-state: paused;
+}
+.ribbon-command kbd {
+  flex-shrink: 0;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.ribbon-command:hover {
+  border-color: var(--accent);
+}
+
+@keyframes ribbon-command-roll {
+  0%,
+  31.48% {
+    transform: translateY(0);
+  }
+  33.33%,
+  64.81% {
+    transform: translateY(-20px);
+  }
+  66.67%,
+  98.15% {
+    transform: translateY(-40px);
+  }
+  100% {
+    transform: translateY(-60px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ribbon-command-hints-track {
+    animation: none;
+  }
+}
+
+@media (max-width: 850px) {
+  .ribbon-command {
+    width: 36px;
+    flex-shrink: 0;
+  }
+  .ribbon-command span,
+  .ribbon-command kbd {
+    display: none;
+  }
+  .ribbon-tabs {
+    overflow-x: auto;
+  }
+  .ribbon-command {
+    position: sticky;
+    right: 0;
+    z-index: 2;
+  }
 }
 
 .ribbon-tabs-divider {
@@ -434,6 +535,12 @@ textarea {
   margin-left: -10px;
   background: var(--surface);
   border-right: 1px solid var(--border-subtle);
+}
+
+@media (max-width: 420px) {
+  .ribbon-mode-group {
+    position: static;
+  }
 }
 
 .ribbon-group {
@@ -3054,6 +3161,58 @@ textarea {
   font-family: var(--font-sans);
   font-variant-numeric: tabular-nums;
   user-select: none;
+}
+
+.status-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  justify-content: flex-end;
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+}
+
+.status-file > :not(.ribbon-file) {
+  flex-shrink: 0;
+}
+.status-bar {
+  gap: 12px;
+}
+
+@media (max-width: 650px) {
+  .zoom-slider {
+    display: none;
+  }
+}
+
+.pdf-sidebar-toggle {
+  flex-shrink: 0;
+  align-self: stretch;
+  width: 28px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.pdf-sidebar-toggle svg {
+  width: 16px;
+  height: 16px;
+}
+.pdf-sidebar-toggle:hover {
+  color: var(--accent);
+  background: var(--hover);
+}
+.read-mode .ribbon,
+.read-mode .ai-dock,
+.read-mode .pdf-thumbs,
+.read-mode .pdf-side-resizer,
+.read-mode .pdf-sidebar-toggle,
+.read-mode .pdf-content-scanning,
+.read-mode .status-bar {
+  display: none;
 }
 
 .status-left {

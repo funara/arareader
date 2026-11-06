@@ -4,6 +4,7 @@ import { createPdfView, pdfIsDirty, requestPdfClose } from '../../../pdf/src/mai
 import type { TabKind, TabSummary } from '../shared/tabs-api'
 import { TAB_STRIP_HEIGHT } from '../shared/tabs-api'
 import { normalizePathKey } from './recent-files'
+import { PDF_CHANNELS } from '../../../pdf/src/shared/ipc'
 
 interface TabRecord {
   id: string
@@ -12,6 +13,7 @@ interface TabRecord {
   view: WebContentsView | null
   title: string
   filePath?: string
+  reading?: boolean
 }
 
 const HOME_ID = 'home'
@@ -105,6 +107,7 @@ export class TabManager {
       title: tab.title,
       closable: tab.id !== HOME_ID,
       active: tab.id === this.activeId,
+      reading: tab.reading ?? false,
     }))
   }
 
@@ -137,6 +140,20 @@ export class TabManager {
     }
     this.activeId = id
     this.onChanged()
+  }
+
+  setReadingFor(webContentsId: number, reading: boolean): void {
+    const tab = this.tabs.find((item) => item.view?.webContents.id === webContentsId)
+    if (!tab || tab.reading === reading) return
+    tab.reading = reading
+    this.onChanged()
+  }
+
+  exitActiveReadMode(): void {
+    const tab = this.activeTab()
+    if (tab?.reading && tab.view && !tab.view.webContents.isDestroyed()) {
+      tab.view.webContents.send(PDF_CHANNELS.exitReadMode)
+    }
   }
 
   /** the focused PDF view's webContents, for File-menu commands routed into it */

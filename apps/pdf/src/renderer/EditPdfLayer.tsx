@@ -153,6 +153,7 @@ export function EditPdfLayer({
   edits,
   readOnly,
   onCommit,
+  onDraftActivity,
 }: {
   doc: PDFDocumentProxy
   /** 1-based PDF page number */
@@ -164,6 +165,7 @@ export function EditPdfLayer({
   edits: readonly PageContentEdit[]
   readOnly: boolean
   onCommit: (edit: PageContentEdit) => void
+  onDraftActivity: (pageIndex: number, active: boolean) => void
 }): ReactElement {
   const rootRef = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -192,6 +194,11 @@ export function EditPdfLayer({
   }, [images, edits])
 
   const [draft, setDraft] = useState<Draft | null>(null)
+  const hasDraft = draft !== null
+  useEffect(() => {
+    onDraftActivity(pageNo - 1, hasDraft)
+  }, [pageNo, hasDraft, onDraftActivity])
+  useEffect(() => () => onDraftActivity(pageNo - 1, false), [pageNo, onDraftActivity])
   const [textDrag, setTextDrag] = useState<TextDrag | null>(null)
   const [imageDrag, setImageDrag] = useState<ImageDrag | null>(null)
   const [imageResize, setImageResize] = useState<ImageResize | null>(null)
