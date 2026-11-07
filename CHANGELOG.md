@@ -5,9 +5,18 @@ All notable changes to **ARAReader** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
----
+## [v0.2.1]
 
-## [0.2.0] - Unreleased
+### Added
+
+- **Page-by-page view:** Switch between continuous scrolling and page-by-page reading from the View tab, footer, or Read-mode header. Navigate pages or spreads with the mouse wheel, keyboard, or thumbnails.
+
+### Changed
+
+- **Reading experience:** Page-by-page view fits pages to the window, keeps your place when switching views, and preserves in-progress text edits when turning pages.
+- **Update dialog:** Refined the update-ready dialog for a clearer, more consistent appearance.
+
+## [v0.2.0]
 
 ### Added
 
@@ -23,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 QR signatures and other visible signatures are **not cryptographic signatures**. The QR contains user-supplied information; it does not verify identity or protect the document from tampering.
 
-## [0.1.0] - 2026-11-04
+## [v0.1.0]
 
 ### Initial Standalone Release
 
