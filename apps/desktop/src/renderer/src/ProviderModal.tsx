@@ -1551,8 +1551,10 @@ export function ProviderModal({
                       Adaptive AI recommendations on document open
                     </div>
                     <div className="settings-toggle-desc">
-                      Automatically gather document context when opening a PDF to suggest tailored
-                      AI prompts in the assistant panel.
+                      When a PDF opens, send the document name, page count, outline titles, and a
+                      short excerpt from the first pages to your configured AI provider to suggest
+                      tailored prompts in the assistant panel. Off keeps the default suggestions and
+                      sends nothing.
                     </div>
                   </div>
                   <input

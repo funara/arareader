@@ -2885,6 +2885,13 @@ textarea {
   background: transparent;
 }
 
+/* the resizer is a keyboard-operable separator: show where focus is */
+.ai-panel-resizer:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 2px;
+}
+
 .ai-panel-resizing {
   cursor: col-resize;
   user-select: none;
@@ -2907,9 +2914,74 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 5px;
+  width: 100%;
   height: 24px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
   font-size: 11.5px;
   color: var(--text-muted);
+  cursor: pointer;
+}
+
+.ai-history-sep:hover {
+  color: var(--text);
+}
+
+.ai-history-caret {
+  flex: none;
+  transition: transform 120ms ease;
+}
+
+.ai-history-caret.open {
+  transform: rotate(90deg);
+}
+
+/* Persistent history failure banner: a lost transcript must not fail silently.
+   It sits above the scroll area so an unsaved boundary stays visible. */
+.ai-history-notice {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 10px 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-subtle);
+  font-size: 11.5px;
+  color: var(--danger);
+}
+
+.ai-history-notice > span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Stopped/failed status of a restored or settled turn */
+.ai-msg-status {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.ai-msg-error .ai-msg-status {
+  color: var(--danger);
+}
+
+/* A failed assistant turn still contains a partial answer, its process card and
+   completed actions: the shared `.ai-msg-error` box recolours all of that red.
+   Keep the answer readable and state the failure with the status line + accent. */
+.ai-msg-assistant.ai-msg-error {
+  padding: 8px 10px 8px 12px;
+  border: 0;
+  border-left: 2px solid var(--danger-border, var(--danger));
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
 }
 
 .ai-msg-undelivered {
@@ -3094,6 +3166,11 @@ textarea {
 
 .ai-msg-historic {
   opacity: 0.78;
+}
+
+/* a restored failed turn must stay as legible as it was before the reload */
+.ai-msg-historic.ai-msg-error {
+  opacity: 1;
 }
 
 /* ================= PDF.js Text Layer (Select/Copy) ================= */

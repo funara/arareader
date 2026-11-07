@@ -160,16 +160,88 @@ export type MdBlock =
   | { kind: 'quote'; lines: string[] }
   | { kind: 'hr' }
   | { kind: 'table'; headers: string[]; rows: string[][] }
+  /** Raw remainder past the block budget; rendered behind a truncation notice. */
+  | { kind: 'truncated'; text: string }
+
+/** GFM escapes only the pipe inside table rows; unescape exactly that. */
+function unescapeCell(text: string): string {
+  return text.replace(/\\\|/g, '|')
+}
+
+/**
+ * Splits one table row into cells. Outside pipes are optional (GFM), and a pipe
+ * only delimits a cell when it is not escaped (`\|`) and not inside a `code span`,
+ * so literal/code pipes never become extra columns.
+ */
+function parseTableRow(rawLine: string): { cells: string[]; piped: boolean } {
+  let body = rawLine.trim()
+  let leading = false
+  let trailing = false
+  if (body.startsWith('|')) {
+    leading = true
+    body = body.slice(1)
+  }
+  // A trailing `\|` is an escaped literal pipe, not a cell delimiter.
+  if (body.endsWith('|') && !body.endsWith('\\|')) {
+    trailing = true
+    body = body.slice(0, -1)
+  }
+
+  const cells: string[] = []
+  let cur = ''
+  let inCode = false
+  let delimiters = 0
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]
+    if (ch === '\\' && i + 1 < body.length) {
+      cur += ch + body[i + 1]
+      i++
+      continue
+    }
+    if (ch === '`') inCode = !inCode
+    if (ch === '|' && !inCode) {
+      cells.push(cur)
+      cur = ''
+      delimiters++
+      continue
+    }
+    cur += ch
+  }
+  cells.push(cur)
+
+  return {
+    cells: cells.map((c) => unescapeCell(c.trim())),
+    piped: leading || trailing || delimiters > 0,
+  }
+}
+
+/** Header/separator only counts as a delimiter row when it actually has pipes. */
+const DELIMITER_CELL_RE = /^:?-+:?$/
+
+function isDelimiterRow(rawLine: string): boolean {
+  const { cells, piped } = parseTableRow(rawLine)
+  return piped && cells.length > 0 && cells.every((c) => DELIMITER_CELL_RE.test(c))
+}
+
+/** Lines that open another block, so a table row scan must stop before them. */
+function startsOtherBlock(line: string): boolean {
+  return (
+    /^#{1,6}\s+/.test(line) ||
+    line.startsWith('```') ||
+    line.startsWith('>') ||
+    /^[-*•]\s+/.test(line) ||
+    /^\d+[.、)]\s+/.test(line)
+  )
+}
 
 function isTableStart(lines: string[], idx: number): boolean {
-  const line = lines[idx]?.trimEnd() ?? ''
-  return (
-    line.includes('|') &&
-    line.trim().startsWith('|') &&
-    line.trim().endsWith('|') &&
-    idx + 1 < lines.length &&
-    /^\|(\s*:?-+:?\s*\|)+$/.test(lines[idx + 1]?.trim() ?? '')
-  )
+  const header = lines[idx]?.trim() ?? ''
+  const next = lines[idx + 1]
+  if (!header || next === undefined) return false
+  // A list, quote, heading or rule line is not a table header, and a bare `---`
+  // (setext/horizontal rule) is not a delimiter row.
+  if (startsOtherBlock(header) || /^(\*\*\*|---|___)$/.test(header)) return false
+  return parseTableRow(header).piped && isDelimiterRow(next)
 }
 const TRAILING_QUESTION_RE =
   /^(.*?[a-zÀ-žА-я一-鿿,;:.!?…)])\s+((?:what|when|where|which|who|whom|whose|why|how|is|are|was|were|do|does|did|can|could|will|would|should|shall|may|might|have|has|had|apa|kapan|di\s?mana|bagaimana|mengapa|kenapa|siapa|berapa|apakah|bisa|bisakah|mau|adakah)\b[^?!]*[?!]\s*)$/i
@@ -316,24 +388,17 @@ export function parseBlocks(text: string): MdBlock[] {
       continue
     }
 
-    // 5. Table (| Col 1 | Col 2 |)
+    // 5. Table (GFM: `| A | B |` and `A | B` are both valid; rows may mix styles)
     if (isTableStart(lines, i)) {
-      const splitRow = (str: string) =>
-        str
-          .trim()
-          .slice(1, -1)
-          .split('|')
-          .map((c) => c.trim())
-
-      const headers = splitRow(line)
-      i += 2 // skip header and separator
+      const headers = parseTableRow(line).cells
+      i += 2 // skip header and delimiter row
       const rows: string[][] = []
-      while (
-        i < lines.length &&
-        (lines[i]?.trim().startsWith('|') ?? false) &&
-        (lines[i]?.trim().endsWith('|') ?? false)
-      ) {
-        rows.push(splitRow(lines[i] ?? ''))
+      while (i < lines.length) {
+        const rowLine = (lines[i] ?? '').trim()
+        if (!rowLine || startsOtherBlock(rowLine)) break
+        const row = parseTableRow(rowLine)
+        if (!row.piped) break
+        rows.push(row.cells)
         i++
       }
       blocks.push({ kind: 'table', headers, rows })
@@ -450,6 +515,13 @@ export function parseBlocks(text: string): MdBlock[] {
     }
   }
 
+  // Never drop the tail past the block budget silently: keep it verbatim so the
+  // renderer can show a truncation notice with the remaining content.
+  if (i < lines.length) {
+    const rest = lines.slice(i).join('\n').trim()
+    if (rest) blocks.push({ kind: 'truncated', text: rest })
+  }
+
   return blocks
 }
 
@@ -493,9 +565,31 @@ export const Markdown = memo(function Markdown({
         if (b.kind === 'hr') {
           return <hr key={i} className="ai-md-hr" />
         }
+        if (b.kind === 'truncated') {
+          return (
+            <details key={i} className="ai-md-truncated">
+              <summary className="ai-md-truncated-summary">
+                {`Answer shortened after ${MAX_BLOCKS.toLocaleString('en-US')} blocks — show remaining content`}
+              </summary>
+              <pre
+                className="ai-md-truncated-pre"
+                tabIndex={0}
+                aria-label="Remaining answer content"
+              >
+                {b.text}
+              </pre>
+            </details>
+          )
+        }
         if (b.kind === 'table') {
           return (
-            <div key={i} className="ai-md-table-wrap">
+            <div
+              key={i}
+              className="ai-md-table-wrap"
+              tabIndex={0}
+              role="region"
+              aria-label="Table, horizontally scrollable"
+            >
               <table className="ai-md-table">
                 <thead>
                   <tr>

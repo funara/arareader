@@ -123,6 +123,8 @@ describe('channel contract', () => {
     expect(FILES_CHANNELS.readImage).toBe('files:read-image')
     expect(FILES_CHANNELS.addPastedImage).toBe('files:add-pasted-image')
     expect(PROJECT_CHANNELS.rebindChat).toBe('project:rebindChat')
+    // durable New-chat boundary (renderer → main); must exist in both channel maps
+    expect(PROJECT_CHANNELS.startNewChat).toBe('project:startNewChat')
     expect([...ATTACHMENT_IMAGE_EXTS].sort()).toEqual(['gif', 'jpeg', 'jpg', 'png', 'webp'])
   })
 })

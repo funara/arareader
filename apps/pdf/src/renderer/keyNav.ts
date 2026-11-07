@@ -30,3 +30,19 @@ export function navAction(key: string, focusInThumbs: boolean): NavAction | null
       return null
   }
 }
+
+/**
+ * True when the focused element is a scroll container that should own the
+ * navigation keys itself. A focusable region (explicit tabindex) that actually
+ * overflows — the assistant's Markdown table, for example — must scroll with
+ * arrows/Home/End instead of turning the page.
+ */
+export function ownsNavKeys(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  if (!el || typeof el.getAttribute !== 'function') return false
+  // only explicitly focusable containers; a plain button must keep page stepping
+  if (el.getAttribute('tabindex') === null) return false
+  if (el.scrollWidth <= el.clientWidth && el.scrollHeight <= el.clientHeight) return false
+  const style = window.getComputedStyle(el)
+  return /(auto|scroll)/.test(`${style.overflowX}${style.overflowY}`)
+}

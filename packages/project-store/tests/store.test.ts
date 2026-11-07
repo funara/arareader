@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync }
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ProjectStore } from '../src/store.js'
+import { parseAppendChatArgs } from '../src/ipc.js'
 
 // ────────────────────────────────────────────────────────────
 // Test helpers
@@ -166,6 +167,42 @@ describe('appendChatMessage + loadChat', () => {
     expect(msgs[0].tools?.[0].name).toBe('write_file')
   })
 
+  it('records tool source links, bounded and sanitized, so a reload keeps its sources', () => {
+    store.appendChatMessage('default', 'chat1', {
+      role: 'assistant',
+      text: 'searched',
+      tools: [
+        {
+          name: 'web_search',
+          summary: 'Web search',
+          links: [
+            { url: 'https://example.com/a', title: 'A' },
+            { url: 'javascript:alert(1)' },
+            // an unbounded title/url must be clipped, not written verbatim
+            { url: `https://example.com/${'x'.repeat(4000)}`, title: 't'.repeat(500) },
+            ...Array.from({ length: 12 }, (_, i) => ({ url: `https://example.com/${i}` })),
+          ],
+        },
+      ],
+    })
+    const links = store.loadChat('default', 'chat1')[0]?.tools?.[0]?.links ?? []
+    expect(links.length).toBe(10)
+    expect(links[0]).toEqual({ url: 'https://example.com/a', title: 'A' })
+    // the allowlist decision stays at render time; the store only bounds size
+    expect(links[1]).toEqual({ url: 'javascript:alert(1)' })
+    expect(links[2]?.url.length).toBe(2048)
+    expect(links[2]?.title?.length).toBe(200)
+  })
+
+  it('never writes a links field when none were recorded (legacy shape)', () => {
+    store.appendChatMessage('default', 'chat1', {
+      role: 'assistant',
+      text: 'read',
+      tools: [{ name: 'read_pages', summary: 'Read pages 1-2' }],
+    })
+    expect(store.loadChat('default', 'chat1')[0]?.tools?.[0]).not.toHaveProperty('links')
+  })
+
   it('limit parameter: returns the most recent valid messages across UTF-8 chunk boundaries', () => {
     const chatsDir = join(tmpDir, 'projects', 'default', 'chats')
     mkdirSync(chatsDir, { recursive: true })
@@ -312,6 +349,25 @@ describe('rebindChat', () => {
     expect(msgs[2].seq).toBe(2) // seq starts at 0 and continues after rebind
   })
 
+  it('keeps the source boundary across a plain rebind (no merge)', () => {
+    store.appendChatMessage('default', 'unsaved-cut', { role: 'user', text: 'old-0' })
+    store.appendChatMessage('default', 'unsaved-cut', { role: 'assistant', text: 'old-1' })
+    store.startNewChat('default', 'unsaved-cut')
+    store.appendChatMessage('default', 'unsaved-cut', { role: 'user', text: 'new-2' })
+
+    store.rebindChat('default', 'unsaved-cut', 'plain-cut-target')
+
+    expect(store.chatBoundary('plain-cut-target')).toBe(2)
+    const restarted = new ProjectStore(tmpDir)
+    expect(restarted.chatBoundary('plain-cut-target')).toBe(2)
+    expect(
+      restarted
+        .loadChat('default', 'plain-cut-target')
+        .filter((m) => m.seq >= restarted.chatBoundary('plain-cut-target'))
+        .map((m) => m.text),
+    ).toEqual(['new-2'])
+  })
+
   it('tempId === newChatId: no-op without errors', () => {
     store.appendChatMessage('default', 'sameId', { role: 'user', text: 'hi' })
     expect(() => store.rebindChat('default', 'sameId', 'sameId')).not.toThrow()
@@ -337,6 +393,94 @@ describe('rebindChat', () => {
 
     store.appendChatMessage('default', newId, { role: 'assistant', text: 'after' })
     expect(store.loadChat('default', newId).map((m) => m.seq)).toEqual([0, 1, 2, 3])
+  })
+
+  it('preserves the source New-chat boundary when merging (older merged messages stay earlier)', () => {
+    const newId = ProjectStore.chatIdForFile('/home/user/merge-boundary.docx')
+    // Target: its own earlier conversation + active turn
+    store.appendChatMessage('default', newId, { role: 'user', text: 'target-old-0' })
+    store.appendChatMessage('default', newId, { role: 'assistant', text: 'target-active-1' })
+    store.startNewChat('default', newId)
+    // Source: earlier conversation + active turn (the unsaved session being saved)
+    store.appendChatMessage('default', 'unsaved-boundary', { role: 'user', text: 'src-old-0' })
+    store.appendChatMessage('default', 'unsaved-boundary', {
+      role: 'assistant',
+      text: 'src-old-1',
+    })
+    store.startNewChat('default', 'unsaved-boundary')
+    store.appendChatMessage('default', 'unsaved-boundary', { role: 'user', text: 'src-new-2' })
+    store.appendChatMessage('default', 'unsaved-boundary', {
+      role: 'assistant',
+      text: 'src-new-3',
+    })
+
+    store.rebindChat('default', 'unsaved-boundary', newId)
+
+    const messages = store.loadChat('default', newId)
+    // Nothing is deleted: target + source rows are all present, renumbered
+    expect(messages.map((m) => m.text)).toEqual([
+      'target-old-0',
+      'target-active-1',
+      'src-old-0',
+      'src-old-1',
+      'src-new-2',
+      'src-new-3',
+    ])
+    expect(messages.map((m) => m.seq)).toEqual([0, 1, 2, 3, 4, 5])
+
+    // The source boundary (seq 2) maps to merged seq 4: only the source's active
+    // turn is active. The target's old active turn must not re-enter it.
+    expect(store.chatBoundary(newId)).toBe(4)
+    const active = messages.filter((m) => m.seq >= store.chatBoundary(newId))
+    expect(active.map((m) => m.text)).toEqual(['src-new-2', 'src-new-3'])
+
+    // A restart keeps the merged boundary; the next message lands in the active part
+    const restarted = new ProjectStore(tmpDir)
+    expect(restarted.chatBoundary(newId)).toBe(4)
+    restarted.appendChatMessage('default', newId, { role: 'user', text: 'after-restart' })
+    const reopened = restarted.loadChat('default', newId)
+    expect(reopened.at(-1)?.seq).toBe(6)
+    expect(reopened.filter((m) => m.seq >= restarted.chatBoundary(newId))).toHaveLength(3)
+  })
+
+  it('keeps a whole legacy source active and the target earlier when the source had no boundary', () => {
+    const newId = ProjectStore.chatIdForFile('/home/user/merge-legacy.docx')
+    store.appendChatMessage('default', newId, { role: 'user', text: 'target-0' })
+    store.appendChatMessage('default', newId, { role: 'assistant', text: 'target-1' })
+    // Legacy source: one continuous conversation, never cut by New chat
+    store.appendChatMessage('default', 'unsaved-legacy', { role: 'user', text: 'source-0' })
+    store.appendChatMessage('default', 'unsaved-legacy', { role: 'assistant', text: 'source-1' })
+
+    store.rebindChat('default', 'unsaved-legacy', newId)
+
+    const messages = store.loadChat('default', newId)
+    expect(messages.map((m) => m.text)).toEqual(['target-0', 'target-1', 'source-0', 'source-1'])
+    // The whole source stays active; the target is older, kept but not seeded
+    expect(store.chatBoundary(newId)).toBe(2)
+    expect(messages.filter((m) => m.seq >= store.chatBoundary(newId)).map((m) => m.text)).toEqual([
+      'source-0',
+      'source-1',
+    ])
+  })
+
+  it('keeps the source boundary when a merge target has none', () => {
+    const newId = ProjectStore.chatIdForFile('/home/user/merge-target-none.docx')
+    store.appendChatMessage('default', newId, { role: 'user', text: 'target-0' })
+    store.appendChatMessage('default', 'unsaved-src-cut', { role: 'user', text: 'old-0' })
+    store.appendChatMessage('default', 'unsaved-src-cut', { role: 'assistant', text: 'old-1' })
+    store.startNewChat('default', 'unsaved-src-cut')
+    store.appendChatMessage('default', 'unsaved-src-cut', { role: 'user', text: 'new-2' })
+
+    store.rebindChat('default', 'unsaved-src-cut', newId)
+
+    const messages = store.loadChat('default', newId)
+    expect(messages.map((m) => m.text)).toEqual(['target-0', 'old-0', 'old-1', 'new-2'])
+    // The buffered target row must not collide with the renumbered source rows
+    expect(messages.map((m) => m.seq)).toEqual([0, 1, 2, 3])
+    expect(store.chatBoundary(newId)).toBe(3)
+    expect(messages.filter((m) => m.seq >= store.chatBoundary(newId)).map((m) => m.text)).toEqual([
+      'new-2',
+    ])
   })
 
   it('keeps the source chat when persisting a merge fails', () => {
@@ -979,3 +1123,141 @@ function mkdirSyncHelper(p: string): void {
     /* ignore */
   }
 }
+
+// ────────────────────────────────────────────────────────────
+// 12. Terminal status + durable conversation boundary (R1/R2/R3)
+// ────────────────────────────────────────────────────────────
+
+describe('terminal status and conversation boundary', () => {
+  let tmpDir: string
+  let store: ProjectStore
+
+  beforeEach(() => {
+    tmpDir = makeTempDir()
+    store = new ProjectStore(tmpDir)
+    store.ensureDefaultProject()
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('persists a stopped assistant turn', () => {
+    store.appendChatMessage('default', 'chat-stopped', { role: 'user', text: 'edit page 1' })
+    store.appendChatMessage('default', 'chat-stopped', {
+      role: 'assistant',
+      text: 'Stopped',
+      status: 'stopped',
+      tools: [{ name: 'edit_text_block', summary: 'Edited page 1', mutated: true }],
+    })
+    const messages = store.loadChat('default', 'chat-stopped')
+    expect(messages[1]!.status).toBe('stopped')
+    // completed action survives with the record so a reload can show what happened
+    expect(messages[1]!.tools?.[0]).toMatchObject({ name: 'edit_text_block', mutated: true })
+  })
+
+  it('keeps unknown status values out of the transcript', () => {
+    store.appendChatMessage('default', 'chat-bad', {
+      role: 'assistant',
+      text: 'x',
+      // SAFETY: an old/corrupt writer may hand over any string
+      status: 'weird' as 'stopped',
+    })
+    expect(store.loadChat('default', 'chat-bad')[0]!.status).toBeUndefined()
+  })
+
+  it('reads a legacy record without status exactly as before', () => {
+    const chatsDir = join(tmpDir, 'projects', 'default', 'chats')
+    mkdirSync(chatsDir, { recursive: true })
+    writeFileSync(
+      join(chatsDir, 'legacy.jsonl'),
+      `${JSON.stringify({ seq: 0, ts: '', role: 'user', text: 'q' })}\n${JSON.stringify({ seq: 1, ts: '', role: 'assistant', text: 'a' })}\n`,
+      'utf8',
+    )
+    const messages = store.loadChat('default', 'legacy')
+    expect(messages.map((m) => m.status)).toEqual([undefined, undefined])
+    expect(messages.map((m) => m.text)).toEqual(['q', 'a'])
+  })
+
+  it('records a New-chat boundary after the last message and survives a restart', () => {
+    store.appendChatMessage('default', 'chat-cut', { role: 'user', text: 'old question' })
+    store.appendChatMessage('default', 'chat-cut', { role: 'assistant', text: 'old answer' })
+    const boundary = store.startNewChat('default', 'chat-cut')
+    expect(boundary).toBe(2)
+    store.appendChatMessage('default', 'chat-cut', { role: 'user', text: 'new question' })
+
+    const restarted = new ProjectStore(tmpDir)
+    expect(restarted.chatBoundary('chat-cut')).toBe(2)
+    const messages = restarted.loadChat('default', 'chat-cut')
+    // Nothing is deleted: the earlier conversation is still on disk
+    expect(messages.map((m) => m.text)).toEqual(['old question', 'old answer', 'new question'])
+    expect(messages.filter((m) => m.seq >= restarted.chatBoundary('chat-cut'))).toHaveLength(1)
+  })
+
+  it('resolveChatForFile reports the boundary of the mapped chat', () => {
+    const ids = store.resolveChatForFile('/docs/report.pdf')
+    expect(ids.boundarySeq).toBe(0)
+    store.appendChatMessage(ids.projectId, ids.chatId, { role: 'user', text: 'q' })
+    store.appendChatMessage(ids.projectId, ids.chatId, { role: 'assistant', text: 'a' })
+    expect(store.startNewChat(ids.projectId, ids.chatId)).toBe(2)
+    expect(store.resolveChatForFile('/docs/report.pdf').boundarySeq).toBe(2)
+  })
+
+  it('a boundary without any message still starts at seq 0', () => {
+    expect(store.chatBoundary('never-used')).toBe(0)
+    expect(store.startNewChat('default', 'never-used')).toBe(0)
+  })
+
+  it('rejects a chatId that is not a safe path segment', () => {
+    expect(() => store.startNewChat('default', '../evil')).toThrow()
+  })
+})
+
+describe('parseAppendChatArgs (IPC contract)', () => {
+  it('forwards the two known terminal states', () => {
+    const parsed = parseAppendChatArgs({
+      projectId: 'default',
+      chatId: 'c1',
+      role: 'assistant',
+      text: 'partial',
+      status: 'failed',
+    })
+    expect(parsed?.message.status).toBe('failed')
+  })
+
+  it('drops an unknown status instead of throwing or writing it', () => {
+    const parsed = parseAppendChatArgs({
+      projectId: 'default',
+      chatId: 'c1',
+      role: 'assistant',
+      text: 'x',
+      status: 'bogus',
+    })
+    expect(parsed).not.toBeNull()
+    expect(parsed?.message.status).toBeUndefined()
+  })
+
+  it('forwards tools (including skipped/mutated) and attachments', () => {
+    const parsed = parseAppendChatArgs({
+      projectId: 'default',
+      chatId: 'c1',
+      role: 'assistant',
+      text: '',
+      tools: [{ name: 't', summary: 's', skipped: true, mutated: false }],
+      attachments: [{ name: 'a.png', path: '/tmp/a.png', ext: 'png' }],
+    })
+    expect(parsed?.message.tools).toEqual([
+      { name: 't', summary: 's', skipped: true, mutated: false },
+    ])
+    expect(parsed?.message.attachments?.[0]?.name).toBe('a.png')
+  })
+
+  it('rejects malformed payloads', () => {
+    expect(parseAppendChatArgs(null)).toBeNull()
+    expect(parseAppendChatArgs({ role: 'user', text: 'x' })).toBeNull()
+    expect(
+      parseAppendChatArgs({ projectId: 'd', chatId: 'c', role: 'system', text: 'x' }),
+    ).toBeNull()
+    expect(parseAppendChatArgs({ projectId: 'd', chatId: 'c', role: 'user', text: 2 })).toBeNull()
+  })
+})

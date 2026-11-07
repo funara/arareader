@@ -49,6 +49,11 @@ import type {
 /** Max stored characters for a single tool input/output field */
 const TOOL_FIELD_MAX_CHARS = 16_000
 
+/** Source links recorded per tool call (bounded: a transcript line must stay small) */
+const TOOL_LINKS_MAX = 10
+const TOOL_LINK_URL_MAX_CHARS = 2048
+const TOOL_LINK_TITLE_MAX_CHARS = 200
+
 // Sheets opens unsaved work in this private temp directory; it is not a project file.
 const TRANSIENT_SHEETS_DIR_PREFIX = `${join(tmpdir(), 'araoffice-sheets')}${sep}`.toLowerCase()
 
@@ -257,8 +262,39 @@ export class ProjectStore {
 
   // ── Index read/write ──────────────────────────────────────
 
-  private readIndex(): ProjectIndex {
-    return readJson<ProjectIndex>(this.indexPath()) ?? { projects: [], fileMap: {} }
+  /**
+   * Reads index.json.
+   *
+   * - no index yet → empty (fresh profile; ENOENT may initialize);
+   * - corrupt JSON → empty for display-only reads, but **throws** with `strict`.
+   *   The bytes are not an empty index: they still hold path→chat mappings and
+   *   New-chat boundaries, so reading them as empty both reports "no boundary"
+   *   (the earlier conversation would re-enter the model) and lets the next
+   *   read-modify-write erase everything in the file;
+   * - unreadable (Windows lock, permissions) → empty for display-only reads, but
+   *   **throws** with `strict`.
+   *
+   * Callers that decide what is the active conversation, or that write the index
+   * back, pass `strict` and surface the rejection as a retryable error.
+   */
+  private readIndex(strict = false): ProjectIndex {
+    const empty = (): ProjectIndex => ({ projects: [], fileMap: {} })
+    if (!existsSync(this.indexPath())) return empty()
+    let text: string
+    try {
+      text = readFileSync(this.indexPath(), 'utf8')
+    } catch (err) {
+      // Removed between the check and the open: still a first run
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return empty()
+      if (strict) throw err
+      return empty()
+    }
+    try {
+      return JSON.parse(text) as ProjectIndex
+    } catch {
+      if (!strict) return empty()
+      throw new Error('project index is not valid JSON; the file was left untouched')
+    }
   }
 
   private writeIndex(index: ProjectIndex): void {
@@ -299,7 +335,8 @@ export class ProjectStore {
     ensureDir(this.projectDir('default'))
     this.writeProject(data)
 
-    const index = this.readIndex()
+    // strict: the empty default must not replace an index we failed to read
+    const index = this.readIndex(true)
     if (!index.projects.find((p) => p.id === 'default')) {
       index.projects.unshift({ id: data.id, name: data.name, createdAt: now, updatedAt: now })
       this.writeIndex(index)
@@ -313,7 +350,8 @@ export class ProjectStore {
    */
   resolveProjectForFile(filePath: string): string {
     this.ensureDefaultProject()
-    const index = this.readIndex()
+    // strict: registering the path must not rewrite an index we could not read
+    const index = this.readIndex(true)
     const existing = index.fileMap[filePath]
     if (existing) return existing
 
@@ -352,16 +390,57 @@ export class ProjectStore {
    * The chatId is registered into chatIdByPath on first resolve; from then on,
    * renaming/moving the file only changes the mapping key — the chatId stays
    * stable and history always follows the file.
+   * boundarySeq is the start of the active conversation (0 when none was ever cut).
    */
-  resolveChatForFile(filePath: string): { projectId: string; chatId: string } {
+  resolveChatForFile(filePath: string): {
+    projectId: string
+    chatId: string
+    boundarySeq: number
+  } {
     const projectId = this.resolveProjectForFile(filePath)
-    const index = this.readIndex()
+    const index = this.readIndex(true)
     const mapped = index.chatIdByPath?.[filePath]
-    if (mapped) return { projectId, chatId: mapped }
+    if (mapped) {
+      return { projectId, chatId: mapped, boundarySeq: index.chatBoundaryByChatId?.[mapped] ?? 0 }
+    }
     const chatId = ProjectStore.chatIdForFile(filePath)
     index.chatIdByPath = { ...(index.chatIdByPath ?? {}), [filePath]: chatId }
     this.writeIndex(index)
-    return { projectId, chatId }
+    return { projectId, chatId, boundarySeq: index.chatBoundaryByChatId?.[chatId] ?? 0 }
+  }
+
+  /**
+   * First seq of the active conversation for this chat (0 = the whole transcript
+   * is one conversation). Throws when the index cannot be read: answering 0 there
+   * would silently revive a conversation the user already closed with New chat.
+   */
+  chatBoundary(chatId: string): number {
+    return this.readIndex(true).chatBoundaryByChatId?.[chatId] ?? 0
+  }
+
+  /**
+   * Marks the start of a new conversation: every message already on disk becomes
+   * the earlier conversation, later messages belong to the new one. Nothing is
+   * deleted and no transcript is rewritten (the boundary lives in index.json).
+   */
+  startNewChat(projectId: string, chatId: string): number {
+    validateId('projectId', projectId)
+    validateId('chatId', chatId)
+    const boundarySeq = this.maxSeq(projectId, chatId) + 1
+    const index = this.readIndex(true)
+    index.chatBoundaryByChatId = {
+      ...(index.chatBoundaryByChatId ?? {}),
+      [chatId]: boundarySeq,
+    }
+    this.writeIndex(index)
+    return boundarySeq
+  }
+
+  /** Current highest seq in the chat (in-memory counter first, else the JSONL tail). */
+  private maxSeq(projectId: string, chatId: string): number {
+    const cur = seqCounters.get(this.seqKey(projectId, chatId))
+    if (cur !== undefined) return cur
+    return this.loadChat(projectId, chatId, 1).at(-1)?.seq ?? -1
   }
 
   /**
@@ -371,7 +450,8 @@ export class ProjectStore {
    */
   fileRenamed(oldPath: string, newPath: string): void {
     if (oldPath === newPath) return
-    const index = this.readIndex()
+    // strict: re-keying a file must not erase the mappings/boundaries it cannot read
+    const index = this.readIndex(true)
     const pid = index.fileMap[oldPath]
     if (pid !== undefined) {
       delete index.fileMap[oldPath]
@@ -432,12 +512,27 @@ export class ProjectStore {
       const ts = msg.ts ?? nowIso()
       const record: ChatMessage = { seq, ts, role: msg.role, text: msg.text }
       if (msg.fileRef !== undefined) record.fileRef = msg.fileRef
+      // Only the two known terminal states are ever written (legacy records have none)
+      if (msg.status === 'stopped' || msg.status === 'failed') record.status = msg.status
       if (msg.tools && msg.tools.length > 0) {
         // Truncate tool inputs/outputs so one JSONL line can't blow up on a huge payload
         record.tools = msg.tools.map((t) => ({
           ...t,
           ...(t.input !== undefined ? { input: t.input.slice(0, TOOL_FIELD_MAX_CHARS) } : {}),
           ...(t.output !== undefined ? { output: t.output.slice(0, TOOL_FIELD_MAX_CHARS) } : {}),
+          ...(t.links && t.links.length > 0
+            ? {
+                links: t.links
+                  .filter((link) => link && typeof link.url === 'string' && link.url !== '')
+                  .slice(0, TOOL_LINKS_MAX)
+                  .map((link) => ({
+                    url: link.url.slice(0, TOOL_LINK_URL_MAX_CHARS),
+                    ...(typeof link.title === 'string' && link.title
+                      ? { title: link.title.slice(0, TOOL_LINK_TITLE_MAX_CHARS) }
+                      : {}),
+                  })),
+              }
+            : {}),
         }))
       }
       if (msg.attachments !== undefined) record.attachments = msg.attachments
@@ -464,6 +559,11 @@ export class ProjectStore {
   /**
    * Reads the most recent `limit` messages (in ascending seq order).
    * A bad JSONL line is skipped without crashing.
+   * A missing file is an empty conversation (ENOENT, including a file removed
+   * between the check and the open); any other read failure (permissions, a
+   * Windows lock, I/O) is thrown so the caller can say the conversation could
+   * not be loaded. Returning the buffered rows alone would read as "empty" and
+   * silently lose the transcript.
    */
   loadChat(projectId: string, chatId: string, limit = 200): ChatMessage[] {
     const pending = this.pendingFirstWrite.get(this.seqKey(projectId, chatId)) ?? []
@@ -477,12 +577,12 @@ export class ProjectStore {
           for (const message of readAllChatMessages(filePath)) messages.push(message)
         }
       }
-      // Sort by seq and take the most recent `limit` entries
-      messages.sort((a, b) => a.seq - b.seq)
-      return messages.slice(-limit)
-    } catch {
-      return messages
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
     }
+    // Sort by seq and take the most recent `limit` entries
+    messages.sort((a, b) => a.seq - b.seq)
+    return messages.slice(-limit)
   }
 
   /**
@@ -517,6 +617,12 @@ export class ProjectStore {
    * Moves chats/<fromId>.jsonl to chats/<toId>.jsonl (possibly across projects).
    * If the target exists, don't overwrite: renumber the source messages' seq and
    * append them at the target's end (old conversations of a same-named file are kept).
+   *
+   * A merge is two conversations in one file, so the boundary is preserved too:
+   * everything before the source's active segment (all target messages plus the
+   * source's earlier conversation) becomes the earlier conversation, and the
+   * source's active segment stays active. Nothing is deleted, and the older
+   * merged messages can never re-enter the model context after a reload.
    */
   private renameOrMergeChat(
     fromProjectId: string,
@@ -529,22 +635,35 @@ export class ProjectStore {
     if (!this.flushPending(fromProjectId, fromId)) return
     const oldPath = this.chatPath(fromProjectId, fromId)
     const newPath = this.chatPath(toProjectId, toId)
+    const sourceBoundary = this.readIndex(true).chatBoundaryByChatId?.[fromId]
+    /** absolute seq where the source's active conversation starts after renumbering */
+    let mergedActiveStartSeq: number | undefined
     let mergedMaxSeq: number | undefined
     let didMove = false
     try {
       if (existsSync(oldPath)) {
         ensureDir(dirname(newPath))
+        // The target may only have buffered opening rows (no file yet): flush them
+        // first so the merge decision sees them. Otherwise the rename below would
+        // overwrite that history and re-use its seq numbers.
+        if (!this.flushPending(toProjectId, toId)) return
         if (!existsSync(newPath)) {
           renameSync(oldPath, newPath)
           didMove = true
         } else {
-          const existing = [
-            ...(this.pendingFirstWrite.get(this.seqKey(toProjectId, toId)) ?? []),
-            ...readChatTail(newPath, 1),
-          ]
+          const existing = readChatTail(newPath, 1)
           existing.sort((a, b) => a.seq - b.seq)
           let seq = (existing.at(-1)?.seq ?? -1) + 1
+          const sourceStartSeq = seq
           const moved = readAllChatMessages(oldPath).sort((a, b) => a.seq - b.seq)
+          // Map the source boundary through the renumbering: the first moved row at
+          // or after it becomes the start of the merged active conversation. No
+          // source boundary (or boundary 0) keeps the whole source active.
+          const activeIndex =
+            sourceBoundary && sourceBoundary > 0
+              ? moved.findIndex((message) => message.seq >= sourceBoundary)
+              : 0
+          mergedActiveStartSeq = sourceStartSeq + (activeIndex < 0 ? moved.length : activeIndex)
           const lines = moved.map((m) => JSON.stringify({ ...m, seq: seq++ }) + '\n').join('')
           if (lines) appendFileSync(newPath, lines, 'utf8')
           unlinkSync(oldPath)
@@ -568,6 +687,23 @@ export class ProjectStore {
     if (next !== undefined) {
       seqCounters.set(this.seqKey(toProjectId, toId), next)
     }
+
+    // Rename: the source boundary moves with the transcript unless the target
+    // already has its own. Merge: the merged threshold is the source's active
+    // start (see above), so the target keeps its own read-only earlier block.
+    const index = this.readIndex(true)
+    const boundaries = index.chatBoundaryByChatId ?? {}
+    const hadSourceBoundary = sourceBoundary !== undefined
+    if (mergedActiveStartSeq !== undefined) {
+      boundaries[toId] = mergedActiveStartSeq
+    } else if (hadSourceBoundary && boundaries[toId] === undefined) {
+      boundaries[toId] = sourceBoundary
+    }
+    if (fromId !== toId) delete boundaries[fromId]
+    if (mergedActiveStartSeq !== undefined || (hadSourceBoundary && fromId !== toId)) {
+      index.chatBoundaryByChatId = boundaries
+      this.writeIndex(index)
+    }
   }
 
   /**
@@ -581,16 +717,16 @@ export class ProjectStore {
   /**
    * After an unsaved session first gets a real file path: register in fileMap,
    * compute the chatId from the path, and move the temp JSONL into the target project.
-   * Returns the new { projectId, chatId } for the renderer to update its references.
+   * Returns the new { projectId, chatId, boundarySeq } for the renderer to update its references.
    */
   rebindChatToFile(
     tempProjectId: string,
     tempChatId: string,
     filePath: string,
-  ): { projectId: string; chatId: string } {
+  ): { projectId: string; chatId: string; boundarySeq: number } {
     const { projectId, chatId } = this.resolveChatForFile(filePath)
     this.renameOrMergeChat(tempProjectId, tempChatId, projectId, chatId)
-    return { projectId, chatId }
+    return { projectId, chatId, boundarySeq: this.chatBoundary(chatId) }
   }
 
   /**

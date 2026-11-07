@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { parseBlocks } from '@arareader/ui'
+import { parseBlocks, type MdBlock } from '@arareader/ui'
+
+/** All text a block carries, so a streaming prefix can be checked for loss. */
+function textOf(blocks: MdBlock[]): string {
+  return blocks
+    .map((b) => {
+      if (b.kind === 'table') return [...b.headers, ...b.rows.flat()].join(' ')
+      if (b.kind === 'code') return b.code
+      if (b.kind === 'truncated') return b.text
+      return JSON.stringify(b)
+    })
+    .join(' ')
+}
 
 describe('parseBlocks markdown parser', () => {
   it('parses headings without infinite loop', () => {
@@ -130,5 +142,139 @@ This document contains #key points from page 1.
     expect(blocks).toEqual([
       { kind: 'ol', start: 1, items: ['First item here', 'Second item here'] },
     ])
+  })
+
+  describe('GFM tables (R4)', () => {
+    it('parses a borderless table', () => {
+      const blocks = parseBlocks('Name | Value\n--- | ---\nAlpha | 1\nBeta | 2')
+      expect(blocks).toEqual([
+        {
+          kind: 'table',
+          headers: ['Name', 'Value'],
+          rows: [
+            ['Alpha', '1'],
+            ['Beta', '2'],
+          ],
+        },
+      ])
+    })
+
+    it('parses a table with no trailing pipe', () => {
+      const blocks = parseBlocks('| Name | Value\n| --- | ---\n| Alpha | 1')
+      expect(blocks).toEqual([
+        { kind: 'table', headers: ['Name', 'Value'], rows: [['Alpha', '1']] },
+      ])
+    })
+
+    it('parses a table with no leading pipe', () => {
+      const blocks = parseBlocks('Name | Value |\n--- | --- |\nAlpha | 1 |')
+      expect(blocks).toEqual([
+        { kind: 'table', headers: ['Name', 'Value'], rows: [['Alpha', '1']] },
+      ])
+    })
+
+    it('parses mixed bordered header and borderless body rows', () => {
+      const input = '| Name | Value |\n| --- | --- |\nAlpha | 1\n| Beta | 2 |\nAfter table'
+      expect(parseBlocks(input)).toEqual([
+        {
+          kind: 'table',
+          headers: ['Name', 'Value'],
+          rows: [
+            ['Alpha', '1'],
+            ['Beta', '2'],
+          ],
+        },
+        { kind: 'p', lines: ['After table'] },
+      ])
+    })
+
+    it('keeps escaped pipes inside a cell instead of splitting columns', () => {
+      const input = '| Op | Note |\n| --- | --- |\n| a \\| b | both |'
+      expect(parseBlocks(input)).toEqual([
+        { kind: 'table', headers: ['Op', 'Note'], rows: [['a | b', 'both']] },
+      ])
+    })
+
+    it('unescapes a pipe in the header row', () => {
+      const blocks = parseBlocks('| a \\| b | c |\n| --- | --- |\n| 1 | 2 |')
+      expect(blocks).toEqual([{ kind: 'table', headers: ['a | b', 'c'], rows: [['1', '2']] }])
+    })
+
+    it('keeps a bare or escaped pipe inside a code span in one cell', () => {
+      const bare = parseBlocks('| Code | N |\n| --- | --- |\n| `a|b` | 2 |')
+      expect(bare).toEqual([{ kind: 'table', headers: ['Code', 'N'], rows: [['`a|b`', '2']] }])
+      const escaped = parseBlocks('| Code | N |\n| --- | --- |\n| `a\\|b` | 2 |')
+      expect(escaped).toEqual([{ kind: 'table', headers: ['Code', 'N'], rows: [['`a|b`', '2']] }])
+    })
+
+    it('accepts aligned delimiter rows', () => {
+      const blocks = parseBlocks('| L | C | R |\n| :--- | :---: | ---: |\n| a | b | c |')
+      expect(blocks).toEqual([{ kind: 'table', headers: ['L', 'C', 'R'], rows: [['a', 'b', 'c']] }])
+    })
+
+    it('ends the table at a heading, list or quote without swallowing them', () => {
+      const input = '| A | B |\n| --- | --- |\n| 1 | 2 |\n## Next\n- item\n> quoted'
+      const blocks = parseBlocks(input)
+      expect(blocks[0]).toEqual({ kind: 'table', headers: ['A', 'B'], rows: [['1', '2']] })
+      expect(blocks[1]).toEqual({ kind: 'h', level: 2, text: 'Next' })
+      expect(blocks[2]).toEqual({ kind: 'ul', items: ['item'] })
+      expect(blocks[3]).toEqual({ kind: 'quote', lines: ['quoted'] })
+    })
+
+    it('does not treat prose plus a setext rule as a borderless table', () => {
+      expect(parseBlocks('cost | revenue\n---')).toEqual([
+        { kind: 'p', lines: ['cost | revenue'] },
+        { kind: 'hr' },
+      ])
+      expect(parseBlocks('Title\n---')).toEqual([{ kind: 'p', lines: ['Title'] }, { kind: 'hr' }])
+    })
+
+    it('does not treat a list item as a table header', () => {
+      const blocks = parseBlocks('- alpha | beta\n--- | ---')
+      expect(blocks.some((b) => b.kind === 'table')).toBe(false)
+      expect(blocks[0]).toEqual({ kind: 'ul', items: ['alpha | beta'] })
+    })
+
+    it('keeps the parser quiet and lossless for every streamed prefix', () => {
+      const doc = '| Name | Value |\n| --- | --- |\n| Alpha | 1 |\n| Beta | 2 |\nAfter the table'
+      const tokens = ['Name', 'Value', 'Alpha', 'Beta', 'After']
+      for (let end = 1; end <= doc.length; end++) {
+        const prefix = doc.slice(0, end)
+        const text = textOf(parseBlocks(prefix))
+        for (const token of tokens) {
+          const start = doc.indexOf(token)
+          if (start >= 0 && start + token.length <= end) expect(text).toContain(token)
+        }
+      }
+      // the complete answer still renders as a real table
+      expect(parseBlocks(doc)[0]).toEqual({
+        kind: 'table',
+        headers: ['Name', 'Value'],
+        rows: [
+          ['Alpha', '1'],
+          ['Beta', '2'],
+        ],
+      })
+    })
+  })
+
+  describe('block budget (R4)', () => {
+    const paragraphs = (n: number) =>
+      Array.from({ length: n }, (_, i) => `para ${i + 1}`).join('\n\n')
+
+    it('keeps the tail past the block budget instead of dropping it', () => {
+      const blocks = parseBlocks(paragraphs(2100))
+      expect(blocks).toHaveLength(2001)
+      expect(blocks[0]).toEqual({ kind: 'p', lines: ['para 1'] })
+      const last = blocks[2000]
+      expect(last?.kind).toBe('truncated')
+      expect(last?.kind === 'truncated' ? last.text : '').toContain('para 2100')
+    })
+
+    it('adds no truncation block at or below the budget', () => {
+      const blocks = parseBlocks(paragraphs(2000))
+      expect(blocks).toHaveLength(2000)
+      expect(blocks.some((b) => b.kind === 'truncated')).toBe(false)
+    })
   })
 })

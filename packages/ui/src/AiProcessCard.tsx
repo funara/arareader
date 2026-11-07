@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 
 export interface ToolDisplay {
   kind: 'images' | 'links' | 'text'
@@ -12,14 +12,23 @@ export interface ToolActivityItem {
   summary: string
   running?: boolean | undefined
   isError?: boolean | undefined
+  /** queued but not executed because the run stopped (or hit a limit) */
+  skipped?: boolean | undefined
+  /** the tool changed the document */
+  mutated?: boolean | undefined
   output?: string | undefined
   display?: ToolDisplay | undefined
 }
+
+/** Terminal state of the run this card belongs to (absent = a complete reply) */
+export type AiProcessOutcome = 'stopped' | 'failed'
 
 export interface AiProcessCardProps {
   thinking?: string | undefined
   tools?: readonly ToolActivityItem[] | undefined
   isStreaming?: boolean | undefined
+  /** stopped/failed run: never reported as a completed run */
+  outcome?: AiProcessOutcome | undefined
   durationSeconds?: number | undefined
   title?: string | undefined
   defaultExpanded?: boolean | undefined
@@ -52,6 +61,7 @@ export function openExternalUrl(url: string): void {
   window.open(url, '_blank', 'noreferrer')
 }
 
+/** Human-readable action label for a tool name */
 function formatToolName(name?: string): string {
   if (!name) return 'Action'
   const FRIENDLY: Record<string, string> = {
@@ -69,15 +79,48 @@ function formatToolName(name?: string): string {
     edit_slide_script: 'Updated slide',
     web_search: 'Web search',
     fetch_url: 'Read webpage',
+    // PDF assistant tools: a queued-but-not-run call only has its name, so the
+    // name itself has to read as an action
+    read_pages: 'Read pages',
+    search_text: 'Searched text',
+    goto_page: 'Jumped to page',
+    get_outline: 'Read outline',
+    list_form_fields: 'Listed form fields',
+    fill_form_field: 'Filled form field',
+    rotate_page: 'Rotated page',
+    delete_page: 'Deleted page',
+    markup_text: 'Added markup',
+    add_note: 'Added note',
+    edit_text_block: 'Edited text',
+    set_outline: 'Updated outline',
+    word_count: 'Counted words',
+    get_metadata: 'Read metadata',
+    set_metadata: 'Updated metadata',
+    read_attachment: 'Read attachment',
   }
   if (FRIENDLY[name]) return FRIENDLY[name]
   return name.replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+const TOOL_OUTPUT_RENDER_MAX = 1500
+
+/** One-line, text-only state of a chip: colour is never the only signal. */
+function chipStatus(tool: ToolActivityItem): string {
+  if (tool.running) return 'running'
+  if (tool.skipped) return 'not run'
+  if (tool.isError) return 'failed'
+  return 'done'
+}
+
+function displayTitle(tool: ToolActivityItem): string {
+  return tool.summary || formatToolName(tool.name)
 }
 
 export function AiProcessCard({
   thinking = '',
   tools = [],
   isStreaming = false,
+  outcome,
   durationSeconds,
   title,
   defaultExpanded,
@@ -93,6 +136,7 @@ export function AiProcessCard({
   const [copiedThinking, setCopiedThinking] = useState(false)
   const prevRunningRef = useRef(anyRunning)
   const drawerRef = useRef<HTMLDivElement | null>(null)
+  const drawerId = useId()
   const thoughtRef = useRef<HTMLDivElement | null>(null)
   /** user scroll intent for the thought preview: scrolling up pauses the follow,
    * returning to the bottom resumes it (big streamed chunks would defeat a
@@ -164,42 +208,67 @@ export function AiProcessCard({
 
   const toolCount = tools.length
   const stepLabel = toolCount === 1 ? '1 step' : `${toolCount} steps`
+  const skippedCount = tools.filter((t) => t.skipped && !t.running).length
+  const errorCount = tools.filter((t) => t.isError && !t.skipped && !t.running).length
+  const successCount = toolCount - skippedCount - errorCount
+  /** calls that actually ran (skipped ones never started) */
+  const ranCount = toolCount - skippedCount
 
   // Summary header label
   let headerLabel = title
   if (!headerLabel) {
-    const errorCount = tools.filter((t) => t.isError).length
-    const successCount = toolCount - errorCount
     if (anyRunning) {
       const runningTool = tools.find((t) => t.running)
-      headerLabel = runningTool
-        ? `Working: ${runningTool.summary || formatToolName(runningTool.name)}…`
-        : 'Working…'
-    } else if (errorCount === toolCount && toolCount > 0) {
-      headerLabel = toolCount === 1 ? 'Action failed' : `${toolCount} actions failed`
-    } else if (errorCount > 0) {
-      headerLabel = `${successCount} of ${toolCount} steps completed`
-    } else if (hasTools) {
-      headerLabel = toolCount === 1 ? '1 step completed' : `${toolCount} steps completed`
-    } else {
+      headerLabel = runningTool ? `Working: ${displayTitle(runningTool)}…` : 'Working…'
+    } else if (!hasTools) {
       headerLabel = 'Reasoning'
+    } else if (outcome === 'failed') {
+      // The collapsed header has to carry the failure too: a collapsed card must
+      // not read as a finished run
+      headerLabel =
+        successCount > 0
+          ? `Failed after ${successCount} completed ${successCount === 1 ? 'action' : 'actions'}`
+          : 'Action failed'
+    } else if (ranCount > 0 && errorCount === ranCount) {
+      headerLabel = ranCount === 1 ? 'Action failed' : `${ranCount} actions failed`
+    } else if (successCount < toolCount && successCount + errorCount > 0) {
+      headerLabel = `${successCount} of ${toolCount} steps completed`
+    } else if (successCount > 0) {
+      headerLabel = successCount === 1 ? '1 step completed' : `${successCount} steps completed`
+    } else {
+      headerLabel = outcome === 'stopped' ? 'Stopped before any action ran' : 'No action ran'
     }
+  }
+
+  // Footer: the honest end state. A failed/stopped run never ends in a green check.
+  let footerKind: 'success' | 'error' | 'muted' = 'success'
+  let footerLabel = '✓ Completed'
+  if (outcome === 'stopped') {
+    footerKind = 'muted'
+    footerLabel =
+      skippedCount > 0 ? `Stopped · ${skippedCount} not run` : 'Stopped · no rollback applied'
+  } else if (outcome === 'failed') {
+    footerKind = 'error'
+    footerLabel = successCount > 0 ? 'Failed after these actions' : 'Failed'
+  } else if (ranCount > 0 && errorCount === ranCount) {
+    footerKind = 'error'
+    footerLabel = errorCount === 1 ? '1 action failed' : `${errorCount} actions failed`
+  } else if (errorCount > 0) {
+    footerKind = 'error'
+    footerLabel = `Completed with ${errorCount} failed`
+  } else if (skippedCount > 0) {
+    footerKind = 'muted'
+    footerLabel = `Completed · ${skippedCount} not run`
   }
 
   return (
     <div className={`ai-process-box${expanded ? ' expanded' : ''}`}>
-      <div
+      <button
+        type="button"
         className="ai-process-header"
         onClick={() => setExpanded((v) => !v)}
-        role="button"
-        tabIndex={0}
         aria-expanded={expanded}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault()
-            setExpanded((v) => !v)
-          }
-        }}
+        aria-controls={drawerId}
       >
         <svg
           className={`ai-process-caret${expanded ? ' open' : ''}`}
@@ -221,16 +290,18 @@ export function AiProcessCard({
         {typeof durationSeconds === 'number' && durationSeconds > 0 && (
           <span className="ai-process-duration">({durationSeconds.toFixed(1)}s)</span>
         )}
-      </div>
+      </button>
 
       {/* Compact Action Trail: Glanceable chips showing tool statuses at a glance */}
       {hasTools && !expanded && (
         <div className="ai-action-trail">
           {tools.map((t, idx) => (
-            <span
+            <button
               key={idx}
-              className={`ai-action-chip ${t.running ? 'is-running' : t.isError ? 'is-error' : 'is-done'}`}
-              title={t.summary || formatToolName(t.name)}
+              type="button"
+              className={`ai-action-chip ${t.running ? 'is-running' : t.skipped ? 'is-skipped' : t.isError ? 'is-error' : 'is-done'}`}
+              title={`${displayTitle(t)} — ${chipStatus(t)}`}
+              aria-label={`${displayTitle(t)} — ${chipStatus(t)}`}
               onClick={() => {
                 setExpanded(true)
                 toggleTool(idx)
@@ -238,6 +309,10 @@ export function AiProcessCard({
             >
               {t.running ? (
                 <span className="ai-action-chip-spinner" aria-hidden="true" />
+              ) : t.skipped ? (
+                <span className="ai-action-chip-err" aria-hidden="true">
+                  –
+                </span>
               ) : t.isError ? (
                 <span className="ai-action-chip-err" aria-hidden="true">
                   ✕
@@ -258,15 +333,13 @@ export function AiProcessCard({
                   <polyline points="3 8.5 6.5 12 13 4" />
                 </svg>
               )}
-              <span className="ai-action-chip-text">
-                {t.summary ? t.summary : formatToolName(t.name)}
-              </span>
-            </span>
+              <span className="ai-action-chip-text">{displayTitle(t)}</span>
+            </button>
           ))}
         </div>
       )}
 
-      <div className="ai-process-drawer" ref={drawerRef}>
+      <div className="ai-process-drawer" id={drawerId} ref={drawerRef}>
         <div className="ai-process-timeline">
           {/* Thinking item */}
           {hasThinking && (
@@ -304,20 +377,32 @@ export function AiProcessCard({
             )
             const hasOutput = !tool.running && (Boolean(tool.output) || hasDisplayData)
             const isToolOpen = expandedTools.has(idx)
-            const statusClass = tool.running ? 'is-running' : tool.isError ? 'is-error' : 'is-tool'
+            const statusClass = tool.running
+              ? 'is-running'
+              : tool.skipped
+                ? 'is-skipped'
+                : tool.isError
+                  ? 'is-error'
+                  : 'is-tool'
+            const toolTitle = displayTitle(tool)
+            const truncated = Boolean(tool.output && tool.output.length > TOOL_OUTPUT_RENDER_MAX)
 
             return (
               <div key={idx} className={`ai-process-item ${statusClass}`}>
                 <div className="ai-process-item-content">
                   <div className="ai-process-item-header">
                     <span className="ai-process-tool-title">
-                      {tool.summary || formatToolName(tool.name)}
+                      {toolTitle}
+                      {!tool.running && (
+                        <span className="ai-process-item-state"> · {chipStatus(tool)}</span>
+                      )}
                     </span>
                     {hasOutput && (
                       <button
                         type="button"
                         className="ai-process-toggle-btn"
                         aria-expanded={isToolOpen}
+                        aria-label={`${toolTitle}: ${isToolOpen ? 'hide' : 'show'} details`}
                         onClick={() => toggleTool(idx)}
                       >
                         {isToolOpen ? 'Hide' : 'Details'}
@@ -364,9 +449,23 @@ export function AiProcessCard({
 
                       {tool.output && (
                         <pre className="ai-tool-output-pre">
-                          {tool.output.slice(0, 1500)}
-                          {tool.output.length > 1500 ? '…' : ''}
+                          {tool.output.slice(0, TOOL_OUTPUT_RENDER_MAX)}
+                          {truncated ? '…' : ''}
                         </pre>
+                      )}
+
+                      {!tool.output && tool.display?.kind === 'text' && tool.display.text && (
+                        <pre className="ai-tool-output-pre">
+                          {tool.display.text.slice(0, TOOL_OUTPUT_RENDER_MAX)}
+                          {tool.display.text.length > TOOL_OUTPUT_RENDER_MAX ? '…' : ''}
+                        </pre>
+                      )}
+
+                      {truncated && tool.output && (
+                        <div className="ai-process-truncation-note">
+                          Showing the first {TOOL_OUTPUT_RENDER_MAX.toLocaleString('en-US')} of{' '}
+                          {tool.output.length.toLocaleString('en-US')} characters.
+                        </div>
                       )}
                     </div>
                   )}
@@ -379,18 +478,22 @@ export function AiProcessCard({
           {anyRunning && hasTools && !tools.some((t) => t.running) && (
             <div className="ai-process-item is-running">
               <div className="ai-process-item-content">
-                <span className="ai-process-tool-summary ai-generating-glow">
-                  Generating response…
-                </span>
+                <span className="ai-process-tool-summary">Generating response…</span>
               </div>
             </div>
           )}
 
-          {/* Completion state */}
+          {/* Completion state: states the real outcome (never a green check for a
+              failed or stopped run) and announces it once */}
           {!anyRunning && hasTools && (
-            <div className="ai-process-item is-done">
+            <div className={`ai-process-item ${footerKind === 'error' ? 'is-error' : 'is-done'}`}>
               <div className="ai-process-item-content">
-                <span className="ai-process-done-label">✓ Completed</span>
+                <span
+                  className={`ai-process-done-label${footerKind === 'error' ? ' is-error' : footerKind === 'muted' ? ' is-muted' : ''}`}
+                  role="status"
+                >
+                  {footerLabel}
+                </span>
               </div>
             </div>
           )}

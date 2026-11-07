@@ -14,6 +14,7 @@ import {
   IconAttach,
   IconBulb,
   IconCheck,
+  IconChevronDown,
   IconCopy,
   IconFileText,
   IconNewChat,
@@ -23,22 +24,33 @@ import {
   openExternalUrl,
   useAiPanelWidth,
   useAiReady,
-  type ToolDisplay,
 } from '@arareader/ui'
 import { createPdfSkill } from './pdf-skill'
 import { createElectronTransport } from './transport'
+import {
+  applyFailedRun,
+  attachmentPathsForRetry,
+  buildActionRecap,
+  mergeIntoHistory,
+  neutralToolName,
+  patchLastEntry,
+  PERSIST_TOOL_FIELD_MAX,
+  PERSIST_TOOL_LINKS_MAX,
+  restoredPrefix,
+  retryKind,
+  toChatEntries,
+  toRestoreMessages,
+  TOOL_OUTPUT_MAX_CHARS,
+  type ChatEntry,
+  type EntryPatch,
+  type PersistedTool,
+} from './chat-lifecycle'
 import type { PdfSkillDeps } from './tools'
 import { useI18n, t as tGlobal, aiLangDirective } from '../i18n/locale'
 import { ATTACHMENT_IMAGE_EXTS } from '../../shared/ipc'
 import type { AttachmentAddResult, AttachmentMeta, PdfProjectApi } from '../../shared/ipc'
 
 const PANEL_WIDTH_KEY = 'pdf-ai-panel-width'
-
-/** Max characters of tool output kept in the UI expansion panel */
-const TOOL_OUTPUT_MAX_CHARS = 2000
-
-/** Cap on tool args/output persisted in the transcript (the store truncates again) */
-const PERSIST_TOOL_FIELD_MAX = 16_000
 
 /** Image attachments read per user message (each one is a vision payload) */
 const MAX_IMAGES_PER_MESSAGE = 20
@@ -51,38 +63,26 @@ const PASTE_MIME_EXT: Record<string, string> = {
   'image/webp': 'webp',
 }
 
-/** One persisted tool row: the shape window.pdfProject.appendChat stores */
-interface PersistedTool {
-  name: string
-  summary: string
-  isError?: boolean
-  input?: string
-  output?: string
+/** Chat ids resolved once per document; the boundary marks where the active conversation starts. */
+interface ChatIds {
+  projectId: string
+  chatId: string
+  boundarySeq?: number
 }
 
-interface ToolActivity {
-  name: string
-  summary: string
-  /** still executing: rendered as a spinner chip, replaced in place when the tool finishes */
-  running?: boolean
-  isError?: boolean
-  output?: string
-  /** side-channel UI payload (link lists from web search, …) */
-  display?: ToolDisplay
-}
-
-interface ChatEntry {
+/** A history write that failed: kept so the user can retry it without retyping */
+interface FailedWrite {
   role: 'user' | 'assistant'
   text: string
-  thinking?: string
-  streaming?: boolean
-  isError?: boolean
-  turnLimit?: boolean
-  stuck?: boolean
-  /** the run failed and this user message was rolled back out of the model context */
-  undelivered?: boolean
-  tools?: ToolActivity[]
-  attachments?: AttachmentMeta[]
+  tools?: PersistedTool[]
+  attachments?: readonly AttachmentMeta[]
+  status?: 'stopped' | 'failed'
+  /**
+   * Belongs to the conversation a New chat just closed: it must be re-appended
+   * before the new boundary, or the recovered record would silently become part
+   * of the new conversation's context after a reload.
+   */
+  closed?: boolean
 }
 
 type Phase = 'thinking' | 'replying' | 'working'
@@ -246,16 +246,34 @@ export function AiPanel({
 }): ReactElement {
   const { lang, t } = useI18n()
   const { isReady } = useAiReady({
-    getAiSettings: window.pdfApi?.getAiSettings ? () => window.pdfApi.getAiSettings() : undefined,
-    onAiSettingsChanged: window.pdfApi?.onAiSettingsChanged
-      ? (h) => window.pdfApi.onAiSettingsChanged!(h)
-      : undefined,
+    // The preload methods are stable; wrapping them in a new arrow here made
+    // useAiReady re-read settings over IPC on every streamed token render.
+    getAiSettings: window.pdfApi?.getAiSettings,
+    onAiSettingsChanged: window.pdfApi?.onAiSettingsChanged,
   })
   const [chat, setChat] = useState<ChatEntry[]>([])
-  /** Past conversation restored from disk (read-only transcript, not fed to the model) */
+  /**
+   * Earlier conversation of this document: kept on disk, shown above the live
+   * chat, never seeded into the model context (New chat keeps it reachable).
+   */
   const [historicChat, setHistoricChat] = useState<ChatEntry[]>([])
+  const [showHistoric, setShowHistoric] = useState(true)
   const [prompt, setPrompt] = useState('')
   const [busy, setBusy] = useState(false)
+  /** Stop was pressed while an action is still finishing (no rollback is implied) */
+  const [stopping, setStopping] = useState(false)
+  /** Persistent history failure banner (a silent loss is worse than a visible one) */
+  const [historyNotice, setHistoryNotice] = useState<'load' | 'save' | 'boundary' | null>(null)
+  /**
+   * History initialization for this document. A send may not start before it
+   * settles (the model would silently miss the conversation it continues), and a
+   * failed load stays blocked until the user retries or explicitly starts fresh.
+   */
+  const [historyState, setHistoryState] = useState<'loading' | 'ready' | 'failed'>('loading')
+  const historyStateRef = useRef<'loading' | 'ready' | 'failed'>('loading')
+  /** New-chat boundary not on disk yet: no message of the new conversation may be written */
+  const [boundaryPending, setBoundaryPending] = useState(false)
+  const boundaryPendingRef = useRef(false)
   const [phase, setPhase] = useState<Phase>('thinking')
   const [attachments, setAttachments] = useState<AttachmentMeta[]>([])
   const [attachNotice, setAttachNotice] = useState<string | null>(null)
@@ -265,11 +283,17 @@ export function AiPanel({
   const chatRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const stickToBottomRef = useRef(true)
-  const { panelWidth, asideRef, resizing, startResize } = useAiPanelWidth(PANEL_WIDTH_KEY, 280)
+  /** reader is away from the bottom: offer Jump to latest */
+  const [showJump, setShowJump] = useState(false)
+  const { panelWidth, asideRef, resizing, startResize, resizeBy } = useAiPanelWidth(
+    PANEL_WIDTH_KEY,
+    280,
+  )
   const [copiedIdx, setCopiedIdx] = useState<string | number | null>(null)
   const [suggestions, setSuggestions] = useState<DynamicSuggestion[]>([])
   const [scanningContext, setScanningContext] = useState(false)
-  const [aiAutoSuggestions, setAiAutoSuggestions] = useState(true)
+  /** null until the preference is known: an automatic scan must never start before it */
+  const [aiAutoSuggestions, setAiAutoSuggestions] = useState<boolean | null>(null)
   const [scanNonce, setScanNonce] = useState(0)
   const userCanceledScanRef = useRef(false)
   const scanAbortControllerRef = useRef<AbortController | null>(null)
@@ -337,9 +361,49 @@ export function AiPanel({
   langRef.current = lang
   const apiRef = useRef(api)
   apiRef.current = api
+  /** the open document path, readable from async work that outlives the render it started in */
+  const filePathRef = useRef(filePath)
+  filePathRef.current = filePath
 
   /** projectId/chatId of the current chat, resolved from the document path */
-  const chatRefIds = useRef<{ projectId: string; chatId: string } | null>(null)
+  const chatRefIds = useRef<ChatIds | null>(null)
+  /** resolves once with the mount-time ids; writes and New chat await it instead of dropping the message */
+  const chatIdsPromiseRef = useRef<Promise<ChatIds | null> | null>(null)
+  /** temp id of an unsaved document, fixed for this mount so a retried resolve reuses it */
+  const tempChatIdRef = useRef<string | null>(null)
+  /** path chatRefIds currently points at: a different path means the transcript moved (Save As) */
+  const idsPathRef = useRef<string | null>(null)
+  /** first seq of the active conversation (durable New-chat boundary) */
+  const boundaryRef = useRef(0)
+  /** serializes history appends in call order (a fire-and-forget assistant write must not overtake the user one) */
+  const writeChainRef = useRef<Promise<void>>(Promise.resolve())
+  /** appends that failed, kept in order for an explicit retry */
+  const failedWritesRef = useRef<FailedWrite[]>([])
+  /** synchronous busy flag: a second Enter in the same tick must not start a second run */
+  const busyRef = useRef(false)
+  /** bumped on New chat / unmount: stale pre-run work must not start a run */
+  const sessionRef = useRef(0)
+  /** Stop landed before the loop started (settings/attachment reads still pending) */
+  const pendingStopRef = useRef(false)
+  /** the last New-chat boundary write failed; the history banner's Retry re-issues it */
+  const boundaryRetryRef = useRef(false)
+  /** New chat requested while a run is active: reset only after the run settles */
+  const pendingNewChatRef = useRef(false)
+  /** true while an action changed the document in the current run (blocks a blind retry) */
+  const mutatedThisRunRef = useRef(false)
+  /** the user record of the in-flight run; persisted with its terminal assistant record */
+  const pendingUserRef = useRef<{ text: string; attachments: readonly AttachmentMeta[] } | null>(
+    null,
+  )
+  /**
+   * Applied actions of a failed run: the next instruction carries this bounded
+   * recap (the loop rolled the failed turn out of its history). It is never a
+   * replay — only a statement of what already changed in the document.
+   */
+  const appliedActionsRef = useRef<string | null>(null)
+  /** latest chat for handlers that must not read setState updaters (New chat merge) */
+  const chatStateRef = useRef<ChatEntry[]>([])
+  chatStateRef.current = chat
   /** Attachments of the in-flight run: the files skill reads this list */
   const runAttachmentsRef = useRef<readonly AttachmentMeta[]>([])
   /** Full tool activity of the whole run — persisted with the assistant turn */
@@ -348,6 +412,57 @@ export function AiPanel({
   attachmentsRef.current = attachments
   /** image paths with a read already issued — one readAttachmentImage per attach, even while pending */
   const previewRequestedRef = useRef(new Set<string>())
+
+  /**
+   * Serializes identity work (resolve, Save As rebind, New-chat boundary) into one
+   * order. Two deferred IPC calls can otherwise complete in either order, and the
+   * last one wins: a boundary written for the chat a Save As already replaced ends
+   * up on a chat with no transcript, so a reload reads the closed conversation as
+   * active. Operations queued here never nest (see the call sites).
+   */
+  const identityChainRef = useRef<Promise<void>>(Promise.resolve())
+
+  const serializeIdentity = <T,>(op: () => Promise<T>): Promise<T> => {
+    const run = identityChainRef.current.then(op)
+    identityChainRef.current = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
+
+  /** Record the state for the render (mirror in the ref for the same-tick send guard). */
+  const markHistoryState = (next: 'loading' | 'ready' | 'failed'): void => {
+    historyStateRef.current = next
+    setHistoryState(next)
+  }
+
+  const markBoundaryPending = (pending: boolean): void => {
+    boundaryPendingRef.current = pending
+    setBoundaryPending(pending)
+  }
+
+  /**
+   * A run may only start on a settled history: otherwise the provider would
+   * receive a conversation without its earlier turns, and the restored rows
+   * would arrive too late to seed the model context.
+   * While the New-chat boundary is unsaved, no message of the new conversation
+   * may be written either — it would sit before the boundary and later read as
+   * part of the earlier conversation.
+   */
+  const sendBlocked = historyState !== 'ready' || boundaryPending
+  const sendBlockedHint =
+    historyState === 'loading'
+      ? t('aiHistoryLoading')
+      : historyState === 'failed'
+        ? t('aiHistoryLoadFailed')
+        : boundaryPending
+          ? t('aiHistoryBoundaryFailed')
+          : undefined
+
+  /** True when this tick may persist or send: the refs are synchronous. */
+  const historyReadyForSend = (): boolean =>
+    historyStateRef.current === 'ready' && !boundaryPendingRef.current
 
   // Image previews: read each newly attached image once, drop previews of removed ones
   useEffect(() => {
@@ -404,50 +519,392 @@ export function AiPanel({
     if (result.rejected.length > 0) notice(result.rejected.join(';'))
   }
 
-  const patchLast = (patch: Partial<ChatEntry> | ((last: ChatEntry) => Partial<ChatEntry>)) => {
-    setChat((prev) => {
-      const next = [...prev]
-      const last = next[next.length - 1]
-      if (!last || last.role !== 'assistant') return prev
-      next[next.length - 1] = { ...last, ...(typeof patch === 'function' ? patch(last) : patch) }
-      return next
+  const patchLast = (patch: EntryPatch): void => {
+    setChat((prev) => patchLastEntry(prev, patch))
+  }
+
+  /**
+   * The document's chat ids, resolving them again when the first attempt failed.
+   * A single rejected IPC call must not dead-end history for the whole session:
+   * every writer (append, New-chat boundary) and the load retry go through here,
+   * so a transient lock/permission failure can still be recovered.
+   */
+  const ensureChatIds = async (): Promise<ChatIds | null> => {
+    if (chatRefIds.current) return chatRefIds.current
+    if (chatIdsPromiseRef.current) {
+      const settled = await chatIdsPromiseRef.current
+      if (settled) return settled
+    }
+    const project = projectApi()
+    if (!project) return null
+    return serializeIdentity(async () => {
+      // A queued rebind/boundary may have resolved the ids while this waited
+      if (chatRefIds.current) return chatRefIds.current
+      if (!tempChatIdRef.current) tempChatIdRef.current = `unsaved-${Date.now()}`
+      // The path this resolve belongs to: a Save As during the await has to stay
+      // visible as a mismatch, so the transcript is re-pointed before it is read.
+      const path = filePathRef.current
+      const resolved = await project
+        .resolveChat({ filePath: path || null, tempChatId: tempChatIdRef.current })
+        .catch(() => null)
+      if (!resolved) return null
+      chatRefIds.current = resolved
+      idsPathRef.current = path
+      chatIdsPromiseRef.current = Promise.resolve(resolved)
+      return resolved
     })
   }
 
+  /**
+   * Read this document's transcript.
+   *
+   * The freshest ids win (`chatRefIds`), so a Save As that rebound in another
+   * effect can never be overwritten by this one. Throws when the New-chat
+   * boundary is unknown: splitting at a guessed 0 would feed a conversation the
+   * user already closed back into the model. A path that changed since the ids
+   * resolved (Save As while opening) re-points the transcript first, so another
+   * document's chat can never be shown or seeded here.
+   */
+  const loadTranscript = async (): Promise<{
+    boundarySeq: number
+    split: { historic: ChatEntry[]; active: ChatEntry[] }
+  }> => {
+    const project = projectApi()
+    if (!project) throw new Error('history is unavailable in this window')
+    let ids = await ensureChatIds()
+    if (!ids) throw new Error("the document's conversation could not be resolved")
+    if (idsPathRef.current === null) idsPathRef.current = filePathRef.current
+    const path = filePathRef.current
+    // Re-point when the document was saved elsewhere, and also when this attempt
+    // does not know the boundary yet: the rebind call returns the chat's current
+    // boundary, so a retry can recover a failed one.
+    if (path && (idsPathRef.current !== path || typeof ids.boundarySeq !== 'number')) {
+      const target = ids
+      // Apply the result inside the identity chain: a rebind queued behind this one
+      // must not be overwritten by a continuation of this call running later.
+      const rebound = await serializeIdentity(async () => {
+        const next = await project.rebindChat({
+          projectId: target.projectId,
+          tempChatId: target.chatId,
+          newFilePath: path,
+        })
+        // No boundarySeq = the rebind failed (the IPC returns it only on success):
+        // never read that as "this chat was never cut"
+        if (typeof next?.boundarySeq !== 'number') return null
+        chatRefIds.current = next
+        chatIdsPromiseRef.current = Promise.resolve(next)
+        idsPathRef.current = path
+        return next
+      })
+      if (!rebound) throw new Error('the conversation boundary could not be resolved')
+      ids = rebound
+    }
+    if (typeof ids.boundarySeq !== 'number') {
+      throw new Error('the conversation boundary could not be resolved')
+    }
+    // A New chat this panel already recorded only ever moves the boundary
+    // forward; the later value can only shrink the active context.
+    const boundarySeq = Math.max(ids.boundarySeq, boundaryRef.current)
+    const messages = await project.loadChat({
+      projectId: ids.projectId,
+      chatId: ids.chatId,
+      limit: 200,
+    })
+    return { boundarySeq, split: toChatEntries(messages, boundarySeq) }
+  }
+
+  /**
+   * Append one record, in call order, once the document's ids are known.
+   * A rejected call or a `false` result is surfaced (a silent loss is worse),
+   * and the surviving record can be retried from the banner.
+   */
   const persistMessage = (
     role: 'user' | 'assistant',
     text: string,
     tools?: PersistedTool[],
     attachmentsToStore?: readonly AttachmentMeta[],
+    status?: 'stopped' | 'failed',
+    closed = false,
   ): void => {
-    const ids = chatRefIds.current
     const project = projectApi()
-    if (!ids || !project) return
-    void project
-      .appendChat({
-        projectId: ids.projectId,
-        chatId: ids.chatId,
-        role,
-        text,
-        ...(tools && tools.length > 0 ? { tools } : {}),
-        ...(attachmentsToStore && attachmentsToStore.length > 0
-          ? {
-              attachments: attachmentsToStore.map((a) => ({
-                name: a.name,
-                path: a.path,
-                ext: a.ext,
-                sizeBytes: a.sizeBytes,
-              })),
-            }
-          : {}),
+    if (!project) return
+    const write: FailedWrite = {
+      role,
+      text,
+      ...(tools && tools.length > 0 ? { tools } : {}),
+      ...(attachmentsToStore && attachmentsToStore.length > 0
+        ? { attachments: attachmentsToStore }
+        : {}),
+      ...(status ? { status } : {}),
+      ...(closed ? { closed: true } : {}),
+    }
+    writeChainRef.current = writeChainRef.current
+      .then(async () => {
+        // An earlier append of this conversation is still unsaved: queue behind it
+        // instead of writing the reply first (a retry has to keep user/assistant
+        // order, and appending it later would invert the transcript).
+        if (failedWritesRef.current.length > 0) {
+          failedWritesRef.current.push(write)
+          setHistoryNotice('save')
+          return
+        }
+        const ids = await ensureChatIds()
+        if (!ids) {
+          failedWritesRef.current.push(write)
+          setHistoryNotice('save')
+          return
+        }
+        let ok: boolean
+        try {
+          ok = await project.appendChat({
+            projectId: ids.projectId,
+            chatId: ids.chatId,
+            role: write.role,
+            text: write.text,
+            ...(write.tools ? { tools: write.tools } : {}),
+            ...(write.attachments
+              ? {
+                  attachments: write.attachments.map((a) => ({
+                    name: a.name,
+                    path: a.path,
+                    ext: a.ext,
+                    sizeBytes: a.sizeBytes,
+                  })),
+                }
+              : {}),
+            ...(write.status ? { status: write.status } : {}),
+          })
+        } catch {
+          ok = false
+        }
+        if (!ok) {
+          failedWritesRef.current.push(write)
+          setHistoryNotice('save')
+          return
+        }
+        failedWritesRef.current = failedWritesRef.current.filter((entry) => entry !== write)
       })
       .catch(() => {
-        /* history persistence failures are silent: the live transcript is unaffected */
+        failedWritesRef.current.push(write)
+        setHistoryNotice('save')
       })
+  }
+
+  /** Re-send the failed appends, in order (the transcript stayed visible while they failed). */
+  const retryHistoryWrite = (): void => {
+    const writes = failedWritesRef.current
+    failedWritesRef.current = []
+    const boundary = boundaryRetryRef.current
+    boundaryRetryRef.current = false
+    setHistoryNotice(null)
+    const closedWrites = writes.filter((write) => write.closed)
+    const currentWrites = writes.filter((write) => !write.closed)
+    // Records of the closed conversation first, then its durable boundary, then
+    // anything from the new conversation: re-issuing startNewChat between the two
+    // groups moves the boundary past the recovered records without swallowing the
+    // new conversation.
+    for (const write of closedWrites) {
+      persistMessage(write.role, write.text, write.tools, write.attachments, write.status, true)
+    }
+    if (boundary) commitNewChatBoundary()
+    for (const write of currentWrites) {
+      persistMessage(write.role, write.text, write.tools, write.attachments, write.status)
+    }
+  }
+
+  /**
+   * Apply a restored transcript without clobbering a conversation the user
+   * already started while history was loading (a send is never dropped).
+   *
+   * Only the ACTIVE conversation is seeded into the model: earlier messages are
+   * display-only. A live turn owns the context already, so seeding is skipped
+   * rather than injected behind the user's back.
+   */
+  const applyRestored = (split: { historic: ChatEntry[]; active: ChatEntry[] }): void => {
+    const liveEmpty = chatStateRef.current.length === 0
+    if (split.historic.length > 0)
+      setHistoricChat((prev) => (prev.length > 0 ? prev : split.historic))
+    // Restored messages are older than anything live: prepend the ones the live
+    // conversation does not already show (a slow or failed load can return rows
+    // this panel has since persisted, and they must not appear twice).
+    if (split.active.length > 0)
+      setChat((prev) => {
+        const prefix = restoredPrefix(split.active, prev)
+        return prefix.length > 0 ? [...prefix, ...prev] : prev
+      })
+    if (liveEmpty) loopRef.current?.restore(toRestoreMessages(split.active))
   }
 
   // The loop is built once; every mutable value goes through a ref getter
   const loopRef = useRef<AgentLoop | null>(null)
+
+  /** Mirror the busy flag synchronously so a second send in the same tick is refused. */
+  const setBusyState = (value: boolean): void => {
+    busyRef.current = value
+    setBusy(value)
+  }
+
+  /** Clear the per-run state after a terminal event. */
+  const settleRunState = (): void => {
+    setBusyState(false)
+    setStopping(false)
+    pendingStopRef.current = false
+    pendingUserRef.current = null
+    runAttachmentsRef.current = []
+  }
+
+  /**
+   * Earlier conversation after a New chat.
+   *
+   * The mount read may never have delivered it: a delayed or failed load is
+   * invalidated by New chat, so the rows below the boundary would only reappear
+   * after a reload. Once the boundary is durable they are read again for display
+   * under the current session — they go to the earlier-conversation block and are
+   * never seeded into the model context.
+   */
+  const refreshEarlierConversation = (): void => {
+    const token = sessionRef.current
+    void loadTranscript()
+      .then(({ boundarySeq, split }) => {
+        if (token !== sessionRef.current) return
+        boundaryRef.current = Math.max(boundaryRef.current, boundarySeq)
+        if (split.historic.length === 0) return
+        // A conversation already moved into the block owns it; this read only
+        // repairs a session that never got its earlier rows.
+        setHistoricChat((prev) => (prev.length > 0 ? prev : split.historic))
+      })
+      .catch(() => {
+        /* The earlier conversation stays out of reach for now; nothing was deleted */
+      })
+  }
+
+  /**
+   * Write the boundary for the chat that owns the transcript.
+   *
+   * A Save As can re-point the chat while the request is in flight: the boundary
+   * would then be stored for a chatId with no transcript, so a reload reads the
+   * closed conversation as active. When the identity moved, write it again for the
+   * chat the panel now uses (this runs on the identity chain, so it stays last).
+   */
+  const writeNewChatBoundary = async (
+    fallback: ChatIds,
+    project: PdfProjectApi,
+  ): Promise<{ boundarySeq: number }> => {
+    // Read the identity when this runs, not when it was queued: a rebind ahead of
+    // it in the chain has already re-pointed the chat.
+    const target = chatRefIds.current ?? fallback
+    const written = await project.startNewChat({
+      projectId: target.projectId,
+      chatId: target.chatId,
+    })
+    const current = chatRefIds.current
+    if (!current || current.chatId === target.chatId) return written
+    return project.startNewChat({ projectId: current.projectId, chatId: current.chatId })
+  }
+
+  /**
+   * Durable New-chat boundary, queued behind the pending appends so the boundary
+   * really starts after the messages of the conversation it closes.
+   *
+   * If an append of that conversation is still unsaved the boundary is deferred:
+   * marking the records `closed` and retrying them later lets the write chain put
+   * the boundary after the recovered records instead of silently turning them
+   * into the new conversation's context.
+   */
+  const commitNewChatBoundary = (): void => {
+    const project = projectApi()
+    if (!project) return
+    writeChainRef.current = writeChainRef.current
+      .then(async () => {
+        const unsaved = failedWritesRef.current
+        if (unsaved.length > 0) {
+          for (const entry of unsaved) entry.closed = true
+          boundaryRetryRef.current = true
+          markBoundaryPending(true)
+          setHistoryNotice('boundary')
+          return
+        }
+        const ids = await ensureChatIds()
+        if (!ids) {
+          boundaryRetryRef.current = true
+          markBoundaryPending(true)
+          setHistoryNotice('boundary')
+          return
+        }
+        try {
+          const next = await serializeIdentity(() => writeNewChatBoundary(ids, project))
+          // The boundary only ever moves forward: a boundary this panel already
+          // recorded must not be reset by a slower write for the same chat.
+          boundaryRef.current = Math.max(boundaryRef.current, next.boundarySeq)
+          boundaryRetryRef.current = false
+          markBoundaryPending(false)
+          // Never clear a save/load warning that is still true
+          setHistoryNotice((prev) => (prev === 'boundary' ? null : prev))
+          // The New chat may have landed before the mount read did: the earlier
+          // conversation is read now instead of waiting for a reload.
+          refreshEarlierConversation()
+        } catch {
+          boundaryRetryRef.current = true
+          markBoundaryPending(true)
+          setHistoryNotice('boundary')
+        }
+      })
+      .catch(() => {
+        boundaryRetryRef.current = true
+        markBoundaryPending(true)
+        setHistoryNotice('boundary')
+      })
+  }
+
+  /**
+   * New chat: fresh model context. The previous conversation is kept on disk and
+   * moved into the earlier-conversation block — nothing is deleted, and it is
+   * never seeded into the model.
+   * `frozen` is the settled conversation when a run was still in flight: the last
+   * turn's terminal state must not depend on a render that has not happened yet
+   * (an earlier-conversation card must never claim a completed run).
+   */
+  const performNewChat = (frozen?: ChatEntry[]): void => {
+    sessionRef.current += 1
+    pendingNewChatRef.current = false
+    pendingStopRef.current = false
+    setStopping(false)
+    setBusyState(false)
+    loopRef.current?.reset()
+    appliedActionsRef.current = null
+    setHistoricChat((prev) => mergeIntoHistory(frozen ?? chatStateRef.current, prev))
+    setShowHistoric(true)
+    setChat([])
+    setPrompt('')
+    attachmentsRef.current = []
+    runAttachmentsRef.current = []
+    setAttachments([])
+    userCanceledScanRef.current = false
+    scannedDocRef.current = null
+    setSuggestions([])
+    setScanNonce((n) => n + 1)
+    // An explicit New chat also settles a failed history load: the user chose to
+    // continue in a fresh conversation instead of retrying the read.
+    markHistoryState('ready')
+    setHistoryNotice((prev) => (prev === 'load' ? null : prev))
+    inputRef.current?.focus()
+    commitNewChatBoundary()
+  }
+
+  /**
+   * New chat while a run is active waits for it to settle: the action already in
+   * flight still lands on the document, so its record must be persisted first.
+   */
+  const requestNewChat = (): void => {
+    scanAbortControllerRef.current?.abort()
+    if (busyRef.current) {
+      pendingNewChatRef.current = true
+      stop()
+      return
+    }
+    performNewChat()
+  }
+
   if (!loopRef.current) {
     const deps: PdfSkillDeps = {
       doc: () => apiRef.current.doc(),
@@ -496,21 +953,38 @@ export function AiPanel({
           patchLast((last) => ({
             tools: [
               ...(last.tools ?? []),
-              { name: call.name, summary: call.name.replace(/[_-]+/g, ' '), running: true },
+              { name: call.name, summary: neutralToolName(call.name), running: true },
             ],
           }))
         },
         onToolExecuted: ({ call, execution }) => {
           setPhase('working')
+          // Any real document change blocks a blind replay of this instruction
+          if (execution.mutated && !execution.skipped) mutatedThisRunRef.current = true
+          // A skipped call has only its raw tool name: state the requested
+          // action in the neutral form, and let the card render the "not run"
+          // state (text + styling, not a past-tense claim)
+          const summary = execution.skipped ? neutralToolName(call.name) : execution.summary
           // Full activity for the persisted transcript (side effects stay out of the setState updater)
           runToolsRef.current.push({
             name: call.name,
-            summary: execution.summary,
+            summary,
             isError: execution.isError,
+            ...(execution.skipped ? { skipped: true } : {}),
+            ...(execution.mutated && !execution.skipped ? { mutated: true } : {}),
             input: safeJsonInput(call.input),
             output: execution.output
               ? execution.output.slice(0, PERSIST_TOOL_FIELD_MAX)
               : undefined,
+            // sources survive a reload as structured links, not as re-parsed text
+            ...(execution.display?.kind === 'links' && execution.display.items?.length
+              ? {
+                  links: execution.display.items.slice(0, PERSIST_TOOL_LINKS_MAX).map((item) => ({
+                    url: item.url,
+                    ...(item.title ? { title: item.title } : {}),
+                  })),
+                }
+              : {}),
           })
           patchLast((last) => {
             const tools = [...(last.tools ?? [])]
@@ -520,8 +994,10 @@ export function AiPanel({
                 ...tools,
                 {
                   name: call.name,
-                  summary: execution.summary,
+                  summary,
                   isError: execution.isError,
+                  ...(execution.skipped ? { skipped: true } : {}),
+                  ...(execution.mutated && !execution.skipped ? { mutated: true } : {}),
                   output: execution.output?.slice(0, TOOL_OUTPUT_MAX_CHARS),
                   display: execution.display,
                 },
@@ -533,96 +1009,125 @@ export function AiPanel({
           setPhase('thinking')
         },
         onDone: ({ text, cancelled, turnLimit, stuck }) => {
+          // The status line states a stop; the answer text stays the model's own
+          // output (a localized "Stopped" inside the reply would be duplicated and
+          // would freeze one locale into the saved transcript).
           const finalText = stuck
             ? [text, tGlobal('aiStopped')].filter(Boolean).join('\n\n')
             : turnLimit
               ? [text, tGlobal('aiTurnLimit')].filter(Boolean).join('\n\n')
-              : text || (cancelled ? tGlobal('aiStopped') : '')
-          patchLast((last) => ({
+              : text
+          const terminal = (last: ChatEntry): Partial<ChatEntry> => ({
             streaming: false,
             turnLimit,
             stuck,
-            text: finalText || (last.tools?.length ? last.text : tGlobal('aiNoReply')),
+            ...(cancelled ? { status: 'stopped' as const } : {}),
+            // only an empty non-stop reply needs a stand-in text
+            text: finalText || (last.tools?.length || cancelled ? last.text : tGlobal('aiNoReply')),
             // A stop mid-tool can leave a running placeholder behind — drop it
             tools: last.tools?.filter((tool) => !tool.running),
-          }))
-          setBusy(false)
-          // Persist outside the updater (a double-invoked updater would write history twice).
-          // Tools-only runs persist too, or the whole turn vanishes from the restored transcript.
-          if (!cancelled && (finalText || runToolsRef.current.length > 0)) {
-            persistMessage('assistant', finalText, runToolsRef.current)
-          }
-        },
-        onError: (error) => {
-          setChat((prev) => {
-            const next = [...prev]
-            // the loop rolled this run's user message out of the model context — surface that
-            for (let i = next.length - 1; i >= 0; i--) {
-              const entry = next[i]!
-              if (entry.role === 'user') {
-                next[i] = { ...entry, undelivered: true }
-                break
-              }
-            }
-            const last = next.at(-1)
-            if (last?.role === 'assistant') {
-              next[next.length - 1] = {
-                ...last,
-                streaming: false,
-                text: error,
-                isError: true,
-                tools: last.tools?.filter((tool) => !tool.running),
-              }
-            }
-            return next
           })
-          setBusy(false)
+          setChat((prev) => patchLastEntry(prev, terminal))
+          // Freeze against the same patch: a New chat requested during the run must
+          // not depend on this update having rendered.
+          const frozen = patchLastEntry(chatStateRef.current, terminal)
+          const userRecord = pendingUserRef.current
+          const tools = runToolsRef.current
+          settleRunState()
+          // The run reached a terminal state and its actions stay in the loop
+          // history, so the failure recap is no longer needed.
+          appliedActionsRef.current = null
+          // Persist outside the updater (a double-invoked updater would write history twice).
+          // Stopped and tools-only runs persist too, or the completed actions and the
+          // partial answer vanish from the restored transcript.
+          if (userRecord) {
+            persistMessage('user', userRecord.text, undefined, userRecord.attachments)
+          }
+          if (finalText || tools.length > 0 || cancelled) {
+            persistMessage(
+              'assistant',
+              finalText,
+              tools,
+              undefined,
+              cancelled ? 'stopped' : undefined,
+            )
+          }
+          if (pendingNewChatRef.current) performNewChat(frozen)
+        },
+        onError: (error, partialText) => {
+          // Keep the partial answer and append the error instead of replacing it
+          const failedText = [partialText, error].filter(Boolean).join('\n\n')
+          const tools = runToolsRef.current
+          const state = {
+            text: failedText,
+            mutated: mutatedThisRunRef.current,
+            // a partial answer or an action that actually ran proves the request was
+            // delivered; only a run that produced nothing is "not delivered"
+            produced: Boolean(partialText) || tools.some((tool) => !tool.skipped),
+          }
+          setChat((prev) => applyFailedRun(prev, state))
+          const frozen = applyFailedRun(chatStateRef.current, state)
+          const userRecord = pendingUserRef.current
+          settleRunState()
+          // The loop rolls a failed run out of its history, so the next
+          // instruction must carry what actually landed — as context, never as
+          // a replay. A failure that applied nothing keeps the previous recap.
+          const recap = buildActionRecap(tools, 12)
+          if (recap && tools.some((tool) => !tool.skipped && !tool.isError)) {
+            appliedActionsRef.current = recap
+          }
+          if (userRecord) {
+            persistMessage('user', userRecord.text, undefined, userRecord.attachments)
+          }
+          // Completed actions survive a failed run, so a reload still shows what
+          // was already applied to the document.
+          if (failedText || tools.length > 0) {
+            persistMessage('assistant', failedText, tools, undefined, 'failed')
+          }
+          if (pendingNewChatRef.current) performNewChat(frozen)
         },
       },
     })
   }
 
-  // Restore this document's transcript once, and seed the loop so follow-ups keep context
+  // Restore this document's transcript once: the earlier conversation above the
+  // durable boundary stays display-only, while the active conversation is also
+  // seeded into the model context (bounded, sanitized, actions as outcomes).
+  // A follow-up after a reload keeps its thread without reviving messages the
+  // user explicitly closed with New chat.
   useEffect(() => {
     const project = projectApi()
-    if (!project) return
-    const tempChatId = `unsaved-${Date.now()}`
-    void project
-      .resolveChat({ filePath: filePath || null, tempChatId })
-      .then((ids) => {
+    if (!project) {
+      // No persistence in this window: there is no history to wait for
+      markHistoryState('ready')
+      return
+    }
+    const token = sessionRef.current
+    tempChatIdRef.current = `unsaved-${Date.now()}`
+    idsPathRef.current = filePath
+    const resolved = project.resolveChat({
+      filePath: filePath || null,
+      tempChatId: tempChatIdRef.current,
+    })
+    chatIdsPromiseRef.current = resolved.catch(() => null)
+    void resolved
+      .then(async (ids) => {
         chatRefIds.current = ids
-        return project.loadChat({ projectId: ids.projectId, chatId: ids.chatId, limit: 200 })
+        return loadTranscript()
       })
-      .then((messages) => {
-        if (!messages || messages.length === 0) return
-        setHistoricChat(
-          messages.map((m) => ({
-            role: m.role,
-            text: m.text,
-            attachments: m.attachments?.flatMap((attachment) =>
-              attachment.path && attachment.ext
-                ? [
-                    {
-                      name: attachment.name,
-                      path: attachment.path,
-                      ext: attachment.ext,
-                      sizeBytes: attachment.sizeBytes ?? 0,
-                    },
-                  ]
-                : [],
-            ),
-            tools: m.tools?.map((tool) => ({
-              name: tool.name,
-              summary: tool.summary,
-              isError: tool.isError,
-              output: tool.output ? tool.output.slice(0, TOOL_OUTPUT_MAX_CHARS) : undefined,
-            })),
-          })),
-        )
-        loopRef.current?.restore(messages.map((m) => ({ role: m.role, text: m.text })))
+      .then(({ boundarySeq, split }) => {
+        if (token !== sessionRef.current) return
+        // A New chat requested while this read was in flight owns the boundary
+        // now: the stale read must not reset it to the old conversation's start.
+        boundaryRef.current = boundarySeq
+        applyRestored(split)
+        setHistoryNotice(null)
+        markHistoryState('ready')
       })
       .catch(() => {
-        /* history load failures are silent */
+        if (token !== sessionRef.current) return
+        setHistoryNotice('load')
+        markHistoryState('failed')
       })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -635,17 +1140,36 @@ export function AiPanel({
   useEffect(() => {
     const previous = prevFilePathRef.current
     prevFilePathRef.current = filePath
-    const ids = chatRefIds.current
     const project = projectApi()
-    if (!project || !ids || !filePath || previous === filePath) return
-    void project
-      .rebindChat({ projectId: ids.projectId, tempChatId: ids.chatId, newFilePath: filePath })
-      .then((next) => {
-        if (next?.chatId) chatRefIds.current = next
+    if (!project || !filePath || previous === filePath) return
+    void (async () => {
+      // A Save As right after open can land before the ids resolved: wait for them
+      // instead of skipping the rebind (the transcript would stay on the old chat).
+      // When the resolve failed, the history retry path owns the rebind.
+      //
+      // Queued with the New-chat boundary: the two re-point the same transcript, so
+      // they have to apply in one order instead of letting the slower IPC win.
+      await serializeIdentity(async () => {
+        const ids = chatRefIds.current ?? (await chatIdsPromiseRef.current)
+        if (!ids || filePathRef.current !== filePath) return
+        const next = await project.rebindChat({
+          projectId: ids.projectId,
+          tempChatId: ids.chatId,
+          newFilePath: filePath,
+        })
+        if (!next?.chatId) return
+        chatRefIds.current = next
+        chatIdsPromiseRef.current = Promise.resolve(next)
+        idsPathRef.current = filePath
+        // A missing boundarySeq means the rebind failed: keep the boundary this
+        // panel already knows instead of reading it as "never cut" (0).
+        if (typeof next.boundarySeq === 'number') {
+          boundaryRef.current = Math.max(boundaryRef.current, next.boundarySeq)
+        }
       })
-      .catch(() => {
-        /* silent */
-      })
+    })().catch(() => {
+      /* history bookkeeping must never break the save; the mount-time path already retries it */
+    })
   }, [filePath])
 
   useEffect(() => {
@@ -656,7 +1180,21 @@ export function AiPanel({
   const onChatScroll = (): void => {
     const el = chatRef.current
     if (!el) return
-    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+    stickToBottomRef.current = distance < 48
+    // A little hysteresis: the button appears once the reader is clearly away
+    // from the newest message and disappears again on return.
+    setShowJump(distance > 120)
+  }
+
+  /** Return to the newest message and resume following the stream. */
+  const jumpToLatest = (): void => {
+    const el = chatRef.current
+    if (!el) return
+    stickToBottomRef.current = true
+    setShowJump(false)
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true
+    el.scrollTo({ top: el.scrollHeight, behavior: reduceMotion ? 'auto' : 'smooth' })
   }
 
   /** Image attachments go multimodal with this user message (≤5MB each, max 20) */
@@ -681,13 +1219,71 @@ export function AiPanel({
     return images
   }
 
-  const runWith = (instruction: string, displayInstruction = instruction): void => {
+  /**
+   * A run that never reached the model: nothing was sent and nothing was applied.
+   * Drop the empty reply placeholder, say the message was not delivered, and keep
+   * the user's text so the composer / Retry can recover it.
+   */
+  const abortPendingRun = (error?: string): void => {
+    const userRecord = pendingUserRef.current
+    settleRunState()
+    const applyAbort = (entries: readonly ChatEntry[]): ChatEntry[] => {
+      const next = [...entries]
+      if (next.at(-1)?.role === 'assistant' && !error) next.pop()
+      else if (next.at(-1)?.role === 'assistant') {
+        next[next.length - 1] = {
+          ...next[next.length - 1]!,
+          streaming: false,
+          isError: true,
+          status: 'failed',
+          text: error!,
+        }
+      }
+      for (let i = next.length - 1; i >= 0; i--) {
+        const entry = next[i]!
+        if (entry.role === 'user') {
+          // nothing reached the model and nothing was applied: the request is
+          // undelivered and re-sending it is safe
+          next[i] = { ...entry, undelivered: true, retryable: true }
+          break
+        }
+      }
+      return next
+    }
+    setChat(applyAbort)
+    // Freeze against the same patch: a New chat requested while this run was
+    // starting must show the failure, not the empty reply placeholder.
+    const frozen = applyAbort(chatStateRef.current)
+    // A pre-run failure is still a terminal turn: keep the record (status=failed)
+    if (error) {
+      if (userRecord) persistMessage('user', userRecord.text, undefined, userRecord.attachments)
+      persistMessage('assistant', error, undefined, undefined, 'failed')
+    }
+    if (pendingNewChatRef.current) performNewChat(frozen)
+  }
+
+  /**
+   * Start one run. `reuseAttachments` re-grants and re-sends the previous message's
+   * attachments (safe retry) instead of silently sending a different request.
+   */
+  const runWith = (
+    instruction: string,
+    displayInstruction = instruction,
+    reuseAttachments?: readonly AttachmentMeta[],
+  ): void => {
     if (!isReady) return
+    // No provider request before the saved conversation is restored: the answer
+    // would silently miss the turns it continues.
+    if (!historyReadyForSend()) return
     const loop = loopRef.current
-    if (!instruction || !loop || loop.busy) return
+    // busyRef is synchronous: a second Enter in the same tick must not queue a second run
+    if (!instruction || !loop || busyRef.current || loop.busy) return
+    const turnAttachments = reuseAttachments ?? attachmentsRef.current
     stickToBottomRef.current = true
     runToolsRef.current = []
-    const turnAttachments = attachmentsRef.current
+    mutatedThisRunRef.current = false
+    pendingStopRef.current = false
+    pendingUserRef.current = { text: instruction, attachments: turnAttachments }
     runAttachmentsRef.current = turnAttachments
     setChat((prev) => [
       ...prev,
@@ -698,12 +1294,18 @@ export function AiPanel({
     // Cleared before the run: one attachment belongs to the message it was sent with
     attachmentsRef.current = []
     setAttachments([])
-    setBusy(true)
+    setBusyState(true)
+    setStopping(false)
     setPhase('thinking')
-    persistMessage('user', instruction, undefined, turnAttachments)
+    // The recap is context for the model, not part of the user's own message
+    // (the transcript keeps `instruction`, sanitized again when restored).
+    const recap = appliedActionsRef.current
+    const modelInstruction = recap ? `${instruction}\n\n${recap}` : instruction
+    const session = sessionRef.current
     void (async () => {
       try {
         const nextSettings = await window.pdfApi.getAiSettings()
+        if (session !== sessionRef.current) return // New chat / doc replaced / unmounted
         // The model is transport configuration, so stored settings pass through.
         settingsRef.current = nextSettings
         // A rejected image read must not strand the run (busy would stay true forever)
@@ -711,22 +1313,59 @@ export function AiPanel({
           notice('The images could not be read; sending the message without them.')
           return []
         })
-        loop.run(instruction, images)
+        if (session !== sessionRef.current) return
+        // Stop landed while settings/images were being read: the request never starts
+        if (pendingStopRef.current) {
+          abortPendingRun()
+          return
+        }
+        loop.run(modelInstruction, images)
       } catch (err) {
-        patchLast({
-          streaming: false,
-          text: err instanceof Error ? err.message : String(err),
-          isError: true,
-        })
-        setBusy(false)
+        if (session !== sessionRef.current) return
+        abortPendingRun(err instanceof Error ? err.message : String(err))
       }
     })()
   }
 
   const send = (text: string): void => runWith(text.trim())
 
-  const stop = (): void => loopRef.current?.cancel()
+  /**
+   * Stop never claims a rollback: queued calls are dropped, an action already
+   * running finishes, and the panel says so until its real result arrives.
+   */
+  const stop = (): void => {
+    if (!busyRef.current) return
+    setStopping(true)
+    const loop = loopRef.current
+    if (loop?.busy) loop.cancel()
+    else pendingStopRef.current = true
+  }
+
   const continueRun = (): void => runWith(CONTINUE_INSTRUCTION)
+
+  /**
+   * Retry a message whose run failed before anything was applied. Attachments are
+   * re-granted through the normal files:add path and re-sent, so the retry is the
+   * same request — never a silently stripped one.
+   */
+  const retryWithAttachments = async (entry: ChatEntry): Promise<void> => {
+    const paths = attachmentPathsForRetry(entry)
+    let reuse: AttachmentMeta[] | undefined
+    if (paths.length > 0) {
+      try {
+        const result = await window.pdfApi.addAttachmentPaths(paths)
+        if (result.rejected.length > 0 || result.accepted.length !== paths.length) {
+          notice('The original attachment is no longer available; attach it again before retrying.')
+          return
+        }
+        reuse = result.accepted
+      } catch {
+        notice('The original attachment is no longer available; attach it again before retrying.')
+        return
+      }
+    }
+    runWith(entry.text, entry.text, reuse)
+  }
 
   const pickAttachments = async (): Promise<void> => {
     try {
@@ -777,28 +1416,41 @@ export function AiPanel({
   }
 
   useEffect(() => {
-    if (preset?.text && isReady) {
+    if (preset?.text && isReady && historyState === 'ready' && !boundaryPending) {
       send(preset.text)
       onClearPreset?.()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preset?.nonce, isReady])
+  }, [preset?.nonce, isReady, historyState, boundaryPending])
 
   useEffect(() => {
     return () => {
+      // Invalidate pending startup: a run must not begin after unmount
+      sessionRef.current += 1
+      busyRef.current = false
       loopRef.current?.cancel()
       loopRef.current?.reset()
     }
   }, [])
 
-  // Adaptive document context scan on first open (or on new chat) when AI is connected and aiAutoSuggestions is enabled
+  // Adaptive document context scan on first open (or on new chat) when AI is connected and aiAutoSuggestions is enabled.
+  // The preference is fetched asynchronously, so "not known yet" must not scan either:
+  // switching automatic recommendations off has to prevent the provider request outright.
+  // History settles first too: a scan for an empty welcome hub would be a wasted
+  // provider call whenever the document already has a conversation.
   useEffect(() => {
-    if (!aiAutoSuggestions) {
+    if (aiAutoSuggestions !== true) {
       setSuggestions([])
       setScanningContext(false)
       return
     }
-    if (!isReady || chat.length > 0 || historicChat.length > 0 || userCanceledScanRef.current) {
+    if (
+      !isReady ||
+      historyState !== 'ready' ||
+      chat.length > 0 ||
+      historicChat.length > 0 ||
+      userCanceledScanRef.current
+    ) {
       setScanningContext(false)
       return
     }
@@ -915,9 +1567,27 @@ export function AiPanel({
       abortCtrl.abort()
       if (pollTimer !== undefined) window.clearTimeout(pollTimer)
     }
-  }, [isReady, aiAutoSuggestions, filePath, scanNonce, chat.length, historicChat.length])
+  }, [
+    isReady,
+    aiAutoSuggestions,
+    filePath,
+    scanNonce,
+    chat.length,
+    historicChat.length,
+    historyState,
+  ])
 
-  const typingLabel = phase === 'replying' ? t('aiReplying') : t('aiWorking')
+  /** newest user message: the only one whose retry is not a duplicate */
+  const lastUserIndex = chat.reduce(
+    (acc, entry, index) => (entry.role === 'user' ? index : acc),
+    -1,
+  )
+
+  const typingLabel = stopping
+    ? t('aiStopping')
+    : phase === 'replying'
+      ? t('aiReplying')
+      : t('aiWorking')
 
   /** attachment card body shared by the composer strip and historic user messages */
   const attachmentCardBody = (attachment: AttachmentMeta): ReactElement => (
@@ -959,8 +1629,23 @@ export function AiPanel({
         className="ai-panel-resizer"
         onPointerDown={startResize}
         role="separator"
+        tabIndex={0}
         aria-orientation="vertical"
-        aria-label="ARA Assistant"
+        aria-label={t('aiResizePanel')}
+        aria-valuenow={panelWidth}
+        aria-valuemin={280}
+        aria-valuemax={Math.min(720, Math.round(window.innerWidth * 0.6))}
+        title={t('aiResizePanel')}
+        onKeyDown={(event) => {
+          // The panel sits on the right, so moving its edge left widens it.
+          const step = event.shiftKey ? 64 : 16
+          if (event.key === 'ArrowLeft') resizeBy(step)
+          else if (event.key === 'ArrowRight') resizeBy(-step)
+          else if (event.key === 'Home') resizeBy(-panelWidth)
+          else if (event.key === 'End') resizeBy(window.innerWidth)
+          else return
+          event.preventDefault()
+        }}
       />
       <AiPanelHeader
         title="ARA Assistant"
@@ -972,25 +1657,8 @@ export function AiPanel({
             ? 'Analyzing document context… (click to cancel)'
             : 'Analyze document context'
         }
-        showNewChat={chat.length > 0 || historicChat.length > 0}
-        onNewChat={() => {
-          stop()
-          scanAbortControllerRef.current?.abort()
-          loopRef.current?.reset()
-          setBusy(false)
-          setChat([])
-          setHistoricChat([])
-          setPrompt('')
-          // the restored transcript belongs to the document, not the live chat
-          attachmentsRef.current = []
-          runAttachmentsRef.current = []
-          setAttachments([])
-          userCanceledScanRef.current = false
-          scannedDocRef.current = null
-          setSuggestions([])
-          setScanNonce((n) => n + 1)
-          inputRef.current?.focus()
-        }}
+        showNewChat={historyState !== 'ready' || chat.length > 0 || historicChat.length > 0}
+        onNewChat={requestNewChat}
         onCollapse={onCollapse}
         newChatLabel={t('aiNewChat')}
         collapseLabel={t('aiCollapsePanel')}
@@ -999,236 +1667,380 @@ export function AiPanel({
         live={busy}
       />
 
-      <div className="ai-chat" ref={chatRef} onScroll={onChatScroll}>
-        {/* past conversation (read-only transcript, not fed to the model) */}
-        {historicChat.length > 0 && (
-          <>
-            {historicChat.map((entry, i) => (
-              <div key={`h${i}`} className={`ai-msg ai-msg-${entry.role} ai-msg-historic`}>
-                {entry.role === 'assistant' &&
-                  (entry.thinking || (entry.tools && entry.tools.length > 0)) && (
-                    <AiProcessCard
-                      thinking={entry.thinking}
-                      tools={entry.tools}
-                      isStreaming={false}
-                      onOpenExternalUrl={openExternalUrl}
-                    />
-                  )}
-                {entry.role === 'assistant' ? (
-                  <>
-                    {entry.text && <Markdown text={entry.text} />}
-                    {entry.text && (
-                      <div
-                        className={`ai-msg-actions${copiedIdx === `h${i}` ? ' has-active' : ''}`}
-                      >
-                        <button
-                          type="button"
-                          className={`ai-msg-action-btn${copiedIdx === `h${i}` ? ' copied' : ''}`}
-                          onClick={() => {
-                            void navigator.clipboard.writeText(entry.text)
-                            setCopiedIdx(`h${i}`)
-                            setTimeout(() => setCopiedIdx(null), 1500)
-                          }}
-                          aria-label={
-                            copiedIdx === `h${i}` ? 'Copied to clipboard' : 'Copy response'
-                          }
-                          title={copiedIdx === `h${i}` ? 'Copied to clipboard' : 'Copy'}
-                        >
-                          {copiedIdx === `h${i}` ? <IconCheck size={13} /> : <IconCopy size={13} />}
-                          <span>{copiedIdx === `h${i}` ? 'Copied' : 'Copy'}</span>
-                        </button>
-                      </div>
+      {/* Outside the scroll area: an unsaved transcript or a missing New-chat
+          boundary must stay visible while the reader is anywhere in the chat */}
+      {historyNotice && (
+        <div className="ai-history-notice" role="alert">
+          <span>
+            {historyNotice === 'load'
+              ? t('aiHistoryLoadFailed')
+              : historyNotice === 'boundary'
+                ? t('aiHistoryBoundaryFailed')
+                : t('aiHistorySaveFailed')}
+          </span>
+          {historyNotice === 'load' && (
+            <button
+              type="button"
+              className="ai-retry-btn"
+              title={`${t('aiNewChat')} — ${t('aiHistoryLoadFailed')}`}
+              onClick={() => performNewChat()}
+            >
+              {t('aiNewChat')}
+            </button>
+          )}
+          <button
+            type="button"
+            className="ai-retry-btn"
+            onClick={() => {
+              if (historyNotice !== 'load') {
+                retryHistoryWrite()
+                return
+              }
+              setHistoryNotice(null)
+              // Reload the transcript without touching the live conversation. The
+              // loader resolves the ids again, so a failed resolve is recoverable
+              // too (and a New chat's boundary is never split at a stale value).
+              const token = sessionRef.current
+              void loadTranscript()
+                .then(({ boundarySeq, split }) => {
+                  // New chat / doc replacement invalidates this load
+                  if (token !== sessionRef.current) return
+                  boundaryRef.current = Math.max(boundaryRef.current, boundarySeq)
+                  applyRestored(split)
+                  markHistoryState('ready')
+                })
+                .catch(() => {
+                  if (token !== sessionRef.current) return
+                  setHistoryNotice('load')
+                  markHistoryState('failed')
+                })
+            }}
+          >
+            {t('aiRetry')}
+          </button>
+        </div>
+      )}
+
+      <div className="ai-chat-wrap">
+        <div
+          className={`ai-chat${showJump ? ' ai-chat-has-jump' : ''}`}
+          ref={chatRef}
+          onScroll={onChatScroll}
+          role="log"
+          aria-live="off"
+          aria-label={t('aiConversation')}
+        >
+          {/* Earlier conversation: kept on disk and reachable here; never sent to the model */}
+          {historicChat.length > 0 && (
+            <div className="ai-history-block">
+              <button
+                type="button"
+                className="ai-history-sep"
+                aria-expanded={showHistoric}
+                onClick={() => setShowHistoric((v) => !v)}
+                title={t('aiEarlierConversation', { count: historicChat.length })}
+              >
+                <svg
+                  className={`ai-history-caret${showHistoric ? ' open' : ''}`}
+                  viewBox="0 0 16 16"
+                  width="10"
+                  height="10"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <polyline points="6 4 10 8 6 12" />
+                </svg>
+                {t('aiEarlierConversation', { count: historicChat.length })}
+              </button>
+              {showHistoric &&
+                historicChat.map((entry, i) => (
+                  <div
+                    key={`h${i}`}
+                    className={`ai-msg ai-msg-${entry.role} ai-msg-historic${entry.isError ? ' ai-msg-error' : ''}`}
+                  >
+                    {entry.role === 'assistant' &&
+                      (entry.thinking || (entry.tools && entry.tools.length > 0)) && (
+                        <AiProcessCard
+                          thinking={entry.thinking}
+                          tools={entry.tools}
+                          isStreaming={false}
+                          {...(entry.status ? { outcome: entry.status } : {})}
+                          onOpenExternalUrl={openExternalUrl}
+                        />
+                      )}
+                    {entry.role === 'assistant' ? (
+                      <>
+                        {entry.text && <Markdown text={entry.text} />}
+                        {entry.status && (
+                          <div
+                            className="ai-msg-status"
+                            role={entry.status === 'failed' ? 'alert' : 'status'}
+                          >
+                            {entry.status === 'stopped' ? t('aiStopped') : t('aiFailed')}
+                          </div>
+                        )}
+                        {entry.text && (
+                          <div
+                            className={`ai-msg-actions${copiedIdx === `h${i}` ? ' has-active' : ''}`}
+                          >
+                            <button
+                              type="button"
+                              className={`ai-msg-action-btn${copiedIdx === `h${i}` ? ' copied' : ''}`}
+                              onClick={() => {
+                                void navigator.clipboard.writeText(entry.text)
+                                setCopiedIdx(`h${i}`)
+                                setTimeout(() => setCopiedIdx(null), 1500)
+                              }}
+                              aria-label={
+                                copiedIdx === `h${i}` ? 'Copied to clipboard' : 'Copy response'
+                              }
+                              title={copiedIdx === `h${i}` ? 'Copied to clipboard' : 'Copy'}
+                            >
+                              {copiedIdx === `h${i}` ? (
+                                <IconCheck size={13} />
+                              ) : (
+                                <IconCopy size={13} />
+                              )}
+                              <span>{copiedIdx === `h${i}` ? 'Copied' : 'Copy'}</span>
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        {entry.text}
+                        {entry.attachments?.map((attachment) => (
+                          <span className="ai-msg-attachment" key={attachment.path}>
+                            {attachmentCardBody(attachment)}
+                          </span>
+                        ))}
+                      </>
                     )}
-                  </>
-                ) : (
-                  <>
-                    {entry.text}
-                    {entry.attachments?.map((attachment) => (
-                      <span className="ai-msg-attachment" key={attachment.path}>
-                        {attachmentCardBody(attachment)}
-                      </span>
-                    ))}
-                  </>
-                )}
-              </div>
-            ))}
-            <div className="ai-history-sep">Earlier conversation</div>
-          </>
-        )}
-        {chat.length === 0 && historicChat.length === 0 && (
-          <div className="ai-chat-empty">
-            {isReady ? (
-              <AiWelcomeHub
-                title="How can ARA help you?"
-                description="Summarize, explain, or anything"
-                isScanning={scanningContext}
-                onEmblemClick={handleGatherContextClick}
-                contextBadge={
-                  scanningContext
-                    ? {
-                        icon: <span className="ai-hub-context-spinner" aria-hidden="true" />,
-                        label: 'Gathering document context…',
-                        action: {
-                          label: 'Cancel',
-                          title: 'Cancel and return to default suggestions',
-                          onClick: cancelQuickScan,
-                        },
-                      }
-                    : suggestions.length > 0 && aiAutoSuggestions
+                  </div>
+                ))}
+            </div>
+          )}
+          {chat.length === 0 && historicChat.length === 0 && (
+            <div className="ai-chat-empty">
+              {isReady ? (
+                <AiWelcomeHub
+                  title="How can ARA help you?"
+                  description="Summarize, explain, or anything"
+                  isScanning={scanningContext}
+                  onEmblemClick={handleGatherContextClick}
+                  contextBadge={
+                    scanningContext
                       ? {
-                          icon: <IconSparkles size={12} />,
-                          label: 'Tailored to this document',
+                          icon: <span className="ai-hub-context-spinner" aria-hidden="true" />,
+                          label: 'Gathering document context…',
                           action: {
-                            label: 'Reset',
-                            title: 'Reset to default suggestions',
+                            label: 'Cancel',
+                            title: 'Cancel and return to default suggestions',
                             onClick: cancelQuickScan,
                           },
                         }
-                      : userCanceledScanRef.current
+                      : suggestions.length > 0 && aiAutoSuggestions
                         ? {
                             icon: <IconSparkles size={12} />,
-                            label: 'Default suggestions',
+                            label: 'Tailored to this document',
                             action: {
-                              label: 'Analyze',
-                              title: 'Analyze document for tailored suggestions',
-                              onClick: triggerContextScan,
+                              label: 'Reset',
+                              title: 'Reset to default suggestions',
+                              onClick: cancelQuickScan,
                             },
                           }
-                        : undefined
-                }
-                cards={(() => {
-                  const defaults: DynamicSuggestion[] = [
-                    {
-                      id: 'pdf-summary',
-                      title: t('aiQuickSummary'),
-                      subtitle: 'Overview & main conclusions',
-                      prompt: t('aiQuickSummaryPrompt'),
-                    },
-                    {
-                      id: 'pdf-key-points',
-                      title: t('aiQuickKeyPoints'),
-                      subtitle: 'Core arguments & takeaways',
-                      prompt: t('aiQuickKeyPointsPrompt'),
-                    },
-                    {
-                      id: 'pdf-explain',
-                      title: t('aiExplain'),
-                      subtitle: 'Break down key sections',
-                      prompt: t('aiExplainPrompt'),
-                    },
-                  ]
-                  const merged =
-                    suggestions.length > 0 && aiAutoSuggestions && !scanningContext
-                      ? [...suggestions, ...defaults.slice(suggestions.length)].slice(0, 3)
-                      : defaults
-                  return merged.map((item, idx) => ({
-                    id: item.id,
-                    icon:
-                      idx === 0 ? (
-                        suggestions.length > 0 && !scanningContext ? (
-                          <IconSparkles size={15} />
+                        : userCanceledScanRef.current
+                          ? {
+                              icon: <IconSparkles size={12} />,
+                              label: 'Default suggestions',
+                              action: {
+                                label: 'Analyze',
+                                title: 'Analyze document for tailored suggestions',
+                                onClick: triggerContextScan,
+                              },
+                            }
+                          : undefined
+                  }
+                  cards={(() => {
+                    const defaults: DynamicSuggestion[] = [
+                      {
+                        id: 'pdf-summary',
+                        title: t('aiQuickSummary'),
+                        subtitle: 'Overview & main conclusions',
+                        prompt: t('aiQuickSummaryPrompt'),
+                      },
+                      {
+                        id: 'pdf-key-points',
+                        title: t('aiQuickKeyPoints'),
+                        subtitle: 'Core arguments & takeaways',
+                        prompt: t('aiQuickKeyPointsPrompt'),
+                      },
+                      {
+                        id: 'pdf-explain',
+                        title: t('aiExplain'),
+                        subtitle: 'Break down key sections',
+                        prompt: t('aiExplainPrompt'),
+                      },
+                    ]
+                    const merged =
+                      suggestions.length > 0 && aiAutoSuggestions && !scanningContext
+                        ? [...suggestions, ...defaults.slice(suggestions.length)].slice(0, 3)
+                        : defaults
+                    return merged.map((item, idx) => ({
+                      id: item.id,
+                      icon:
+                        idx === 0 ? (
+                          suggestions.length > 0 && !scanningContext ? (
+                            <IconSparkles size={15} />
+                          ) : (
+                            <IconFileText size={15} />
+                          )
+                        ) : idx === 1 ? (
+                          <IconBulb size={15} />
                         ) : (
-                          <IconFileText size={15} />
-                        )
-                      ) : idx === 1 ? (
-                        <IconBulb size={15} />
-                      ) : (
-                        <IconSparkles size={15} />
-                      ),
-                    title: item.title,
-                    subtitle: item.subtitle,
-                    onClick: () => {
-                      if (scanningContext) {
-                        cancelQuickScan()
-                      }
-                      send(item.prompt)
-                    },
-                  }))
-                })()}
-              />
-            ) : (
-              <AiUnconfiguredCard onConfigure={() => void window.pdfApi?.configureAi?.()} />
-            )}
-          </div>
-        )}
-        {chat.map((entry, i) => {
-          if (entry.role === 'user') {
-            return (
-              <div key={i} className="ai-msg ai-msg-user">
-                {entry.text}
-                {entry.attachments?.map((attachment) => (
-                  <span className="ai-msg-attachment" key={attachment.path}>
-                    {attachmentCardBody(attachment)}
-                  </span>
-                ))}
-                {entry.undelivered && (
-                  <div className="ai-msg-undelivered">
-                    {t('aiUndelivered')}
-                    {!busy && (
-                      <button className="ai-retry-btn" onClick={() => send(entry.text)}>
-                        {t('aiRetry')}
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            )
-          }
-          const isLast = i === chat.length - 1
-          return (
-            <div
-              key={i}
-              className={`ai-msg ai-msg-assistant${entry.isError ? ' ai-msg-error' : ''}`}
-            >
-              {(() => {
-                const extracted = extractThinking(entry.text)
-                const displayThinking = entry.thinking || extracted.thinking
-                const displayText = extracted.thinking ? extracted.text : entry.text
-                const hasProcess = Boolean(
-                  displayThinking || (entry.tools && entry.tools.length > 0),
-                )
-                return (
-                  <>
-                    {hasProcess && (
-                      <AiProcessCard
-                        thinking={displayThinking}
-                        tools={entry.tools}
-                        isStreaming={entry.streaming}
-                        onOpenExternalUrl={openExternalUrl}
-                      />
-                    )}
-                    {displayText && <Markdown text={displayText} />}
-                    {!entry.streaming && displayText && (
-                      <div className={`ai-msg-actions${copiedIdx === i ? ' has-active' : ''}`}>
-                        <button
-                          type="button"
-                          className={`ai-msg-action-btn${copiedIdx === i ? ' copied' : ''}`}
-                          onClick={() => {
-                            void navigator.clipboard.writeText(displayText)
-                            setCopiedIdx(i)
-                            setTimeout(() => setCopiedIdx(null), 1500)
-                          }}
-                          aria-label={copiedIdx === i ? 'Copied to clipboard' : 'Copy response'}
-                          title={copiedIdx === i ? 'Copied to clipboard' : 'Copy'}
-                        >
-                          {copiedIdx === i ? <IconCheck size={13} /> : <IconCopy size={13} />}
-                          <span>{copiedIdx === i ? 'Copied' : 'Copy'}</span>
-                        </button>
-                      </div>
-                    )}
-                  </>
-                )
-              })()}
-              {entry.turnLimit && !entry.stuck && isLast && !busy && (
-                <button className="ai-retry-btn" onClick={continueRun}>
-                  {t('aiContinue')}
-                </button>
+                          <IconSparkles size={15} />
+                        ),
+                      title: item.title,
+                      subtitle: item.subtitle,
+                      onClick: () => {
+                        if (scanningContext) {
+                          cancelQuickScan()
+                        }
+                        send(item.prompt)
+                      },
+                    }))
+                  })()}
+                />
+              ) : (
+                <AiUnconfiguredCard onConfigure={() => void window.pdfApi?.configureAi?.()} />
               )}
             </div>
-          )
-        })}
-        {/* In-progress state: a standalone three-dot row at the end of the stream, kept until done */}
-        {busy && <AiTypingIndicator label={typingLabel} />}
+          )}
+          {chat.map((entry, i) => {
+            const isLastUser = i === lastUserIndex
+            if (entry.role === 'user') {
+              // A failed/stopped run may already have changed the document: offer a
+              // replay only when nothing was applied, otherwise the composer is the
+              // recovery path (a blind re-send would repeat a non-idempotent edit).
+              // Only the newest failed request is replayable: an older one was already
+              // superseded, and re-sending it would queue a duplicate instruction.
+              const canReplay =
+                entry.retryable === true &&
+                isLastUser &&
+                retryKind(entry.mutated === true) === 'retry'
+              return (
+                <div key={i} className="ai-msg ai-msg-user">
+                  {entry.text}
+                  {entry.attachments?.map((attachment) => (
+                    <span className="ai-msg-attachment" key={attachment.path}>
+                      {attachmentCardBody(attachment)}
+                    </span>
+                  ))}
+                  {(entry.undelivered || (!busy && canReplay)) && (
+                    <div className="ai-msg-undelivered">
+                      {entry.undelivered && t('aiUndelivered')}
+                      {!busy && canReplay && (
+                        <button
+                          className="ai-retry-btn"
+                          onClick={() => void retryWithAttachments(entry)}
+                        >
+                          {t('aiRetry')}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            }
+            const isLast = i === chat.length - 1
+            return (
+              <div
+                key={i}
+                className={`ai-msg ai-msg-assistant${entry.isError ? ' ai-msg-error' : ''}`}
+              >
+                {(() => {
+                  const extracted = extractThinking(entry.text)
+                  const displayThinking = entry.thinking || extracted.thinking
+                  const displayText = extracted.thinking ? extracted.text : entry.text
+                  const hasProcess = Boolean(
+                    displayThinking || (entry.tools && entry.tools.length > 0),
+                  )
+                  return (
+                    <>
+                      {hasProcess && (
+                        <AiProcessCard
+                          thinking={displayThinking}
+                          tools={entry.tools}
+                          isStreaming={entry.streaming}
+                          {...(entry.status ? { outcome: entry.status } : {})}
+                          onOpenExternalUrl={openExternalUrl}
+                        />
+                      )}
+                      {displayText && <Markdown text={displayText} />}
+                      {entry.status && (
+                        <div
+                          className="ai-msg-status"
+                          role={entry.status === 'failed' ? 'alert' : 'status'}
+                        >
+                          {entry.status === 'stopped' ? t('aiStopped') : t('aiFailed')}
+                        </div>
+                      )}
+                      {!entry.streaming && displayText && (
+                        <div className={`ai-msg-actions${copiedIdx === i ? ' has-active' : ''}`}>
+                          <button
+                            type="button"
+                            className={`ai-msg-action-btn${copiedIdx === i ? ' copied' : ''}`}
+                            onClick={() => {
+                              void navigator.clipboard.writeText(displayText)
+                              setCopiedIdx(i)
+                              setTimeout(() => setCopiedIdx(null), 1500)
+                            }}
+                            aria-label={copiedIdx === i ? 'Copied to clipboard' : 'Copy response'}
+                            title={copiedIdx === i ? 'Copied to clipboard' : 'Copy'}
+                          >
+                            {copiedIdx === i ? <IconCheck size={13} /> : <IconCopy size={13} />}
+                            <span>{copiedIdx === i ? 'Copied' : 'Copy'}</span>
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )
+                })()}
+                {entry.turnLimit && !entry.stuck && isLast && !busy && (
+                  <button className="ai-retry-btn" onClick={continueRun}>
+                    {t('aiContinue')}
+                  </button>
+                )}
+                {/* After a completed edit, recovery is a new instruction: the chips
+                  above list what already happened, and nothing is replayed. */}
+                {entry.status === 'failed' &&
+                  isLast &&
+                  !busy &&
+                  (entry.tools ?? []).some((tool) => tool.mutated && !tool.skipped) && (
+                    <div className="ai-msg-undelivered">{t('aiEditThenFailed')}</div>
+                  )}
+              </div>
+            )
+          })}
+          {/* In-progress state: a standalone three-dot row at the end of the stream, kept until done */}
+          {busy && <AiTypingIndicator label={typingLabel} />}
+        </div>
+        {showJump && (
+          <button
+            type="button"
+            className="ai-jump-latest"
+            onClick={jumpToLatest}
+            title={t('aiJumpToLatest')}
+            aria-label={t('aiJumpToLatest')}
+          >
+            <IconChevronDown size={13} />
+            <span>{t('aiJumpToLatest')}</span>
+          </button>
+        )}
       </div>
 
       <div className="ai-composer">
@@ -1236,10 +2048,14 @@ export function AiPanel({
         <AiComposer
           authGate={undefined}
           disabled={!isReady}
+          sendBlocked={sendBlocked}
+          sendBlockedHint={sendBlockedHint}
           value={prompt}
           busy={busy}
           ariaLabel={t('aiComposerPlaceholder')}
-          placeholder={t('aiComposerPlaceholder')}
+          placeholder={
+            historyState === 'loading' ? t('aiHistoryLoading') : t('aiComposerPlaceholder')
+          }
           hintIdle={t('aiHintIdle')}
           hintBusy={t('aiHintBusy')}
           sendLabel={t('aiSend')}

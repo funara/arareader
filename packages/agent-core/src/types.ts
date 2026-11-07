@@ -56,6 +56,12 @@ export interface ToolExecution {
   isError?: boolean
   /** true when the tool changed the underlying artifact (document / sheet / deck) */
   mutated?: boolean
+  /**
+   * Queued but deliberately not executed (the run was stopped, the stuck-loop
+   * guard fired, or the tool-call budget ran out). The paired tool_result is
+   * still emitted so the next request keeps tool_use/tool_result pairing valid.
+   */
+  skipped?: boolean
   /** short human-readable label for activity UI */
   summary: string
   /**

@@ -19,6 +19,8 @@ export interface AiPanelWidth {
   readonly asideRef: React.RefObject<HTMLElement | null>
   readonly resizing: boolean
   readonly startResize: (e: ReactPointerEvent<HTMLDivElement>) => void
+  /** keyboard path: clamp + persist in one call (pointer resize persists on pointerup) */
+  readonly resizeBy: (delta: number) => void
 }
 
 /**
@@ -78,5 +80,18 @@ export function useAiPanelWidth(key: string, min = 280, defaultValue = 360): AiP
     [key, min],
   )
 
-  return { panelWidth, setPanelWidth, asideRef, resizing, startResize }
+  /** Keyboard resizing: the resizer is a labelled separator, so arrow keys must work. */
+  const widthRef = useRef(panelWidth)
+  widthRef.current = panelWidth
+  const resizeBy = useCallback(
+    (delta: number) => {
+      const next = clampAiPanelWidth(widthRef.current + delta, min)
+      widthRef.current = next
+      setPanelWidth(next)
+      localStorage.setItem(key, String(Math.round(next)))
+    },
+    [key, min],
+  )
+
+  return { panelWidth, setPanelWidth, asideRef, resizing, startResize, resizeBy }
 }

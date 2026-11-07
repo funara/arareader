@@ -24,7 +24,7 @@ import { EditPdfLayer } from './EditPdfLayer'
 import { compileContentEdits, displayBoxToPdf, imageFileToPng } from './content-edit'
 import type { PageContentEdit } from './content-edit'
 import { FormLayer } from './FormLayer'
-import { navAction } from './keyNav'
+import { navAction, ownsNavKeys } from './keyNav'
 import { pageRow, rowOfVisIdx, rowTopOffsets, spreadRows, stepPage } from './spread'
 import { wheelPageTurn } from './wheel-paging'
 import { hasUnsavedEdits } from './dirty'
@@ -3069,6 +3069,11 @@ export default function App() {
       // The organize grid is a modal overlay: page navigation/delete keys belong to it
       if (organizeOpen) return
       if (inEditable) return
+      // A control that already handled this key keeps it: the assistant panel-width
+      // separator resizes with the arrow keys and must not also turn the page
+      if (e.defaultPrevented) return
+      // A focused scroll region (the assistant table) scrolls itself with these keys
+      if (ownsNavKeys(target)) return
       if ((e.key === 'Delete' || e.key === 'Backspace') && selected) {
         e.preventDefault()
         deleteSelected()

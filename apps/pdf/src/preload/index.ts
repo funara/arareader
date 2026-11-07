@@ -100,6 +100,7 @@ const projectApi: PdfProjectApi = {
   appendChat: (args) => ipcRenderer.invoke(PROJECT_CHANNELS.appendChat, args),
   loadChat: (args) => ipcRenderer.invoke(PROJECT_CHANNELS.loadChat, args),
   rebindChat: (args) => ipcRenderer.invoke(PROJECT_CHANNELS.rebindChat, args),
+  startNewChat: (args) => ipcRenderer.invoke(PROJECT_CHANNELS.startNewChat, args),
 }
 
 contextBridge.exposeInMainWorld('pdfProject', projectApi)

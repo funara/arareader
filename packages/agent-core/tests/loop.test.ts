@@ -42,7 +42,9 @@ function scriptedTransport(script: Array<(cb: AgentStreamCallbacks) => void>): A
   return transport
 }
 
-function makeSkill(execute?: (call: AgentToolCall) => ToolExecution): AgentSkill {
+function makeSkill(
+  execute?: (call: AgentToolCall) => ToolExecution | Promise<ToolExecution>,
+): AgentSkill {
   return {
     id: 'test',
     systemPrompt: 'system',
@@ -695,6 +697,37 @@ describe('AgentLoop', () => {
     ])
   })
 
+  it('keeps the partial answer of a turn that failed after a completed tool', async () => {
+    // edit succeeds → provider fails on the follow-up turn: the UI must be able to
+    // show the partial text *and* the completed action, and the failed run must not
+    // sit in the model context.
+    const transport = scriptedTransport([
+      (cb) => {
+        cb.onToolCall({ id: 't1', name: 'do_thing', input: {} })
+        cb.onDone()
+      },
+      (cb) => {
+        cb.onDelta('Half a summary of ')
+        cb.onError('provider dropped the connection')
+      },
+    ])
+    const onError = vi.fn()
+    const onToolExecuted = vi.fn()
+    const loop = new AgentLoop({
+      transport,
+      skill: makeSkill(() => ({ output: 'edited', summary: 'Edited page 1', mutated: true })),
+      events: { onError, onToolExecuted },
+    })
+    loop.run('edit page 1 then summarise')
+    await flush()
+    await flush()
+    expect(onToolExecuted).toHaveBeenCalledTimes(1)
+    expect(onToolExecuted.mock.calls[0]![0].execution.mutated).toBe(true)
+    expect(onError).toHaveBeenCalledWith('provider dropped the connection', 'Half a summary of')
+    // The failed run is rolled back out of the model context (nothing is replayed)
+    expect(loop.messages).toEqual([])
+  })
+
   it('restore drops unanswered user messages (trailing and adjacent)', () => {
     const transport = scriptedTransport([])
     const loop = new AgentLoop({ transport, skill: makeSkill() })
@@ -1205,6 +1238,110 @@ describe('AgentLoop compaction', () => {
     for (let i = 0; i < 6; i++) await flush()
     expect(loop.busy).toBe(false)
     expect(transport.requests).toHaveLength(4)
+  })
+
+  it('reports skipped tool calls when the user stops mid-batch (defect: skipped work was invisible)', async () => {
+    const transport = scriptedTransport([
+      (cb) => {
+        cb.onToolCall({ id: 't1', name: 'do_thing', input: { n: 1 } })
+        cb.onToolCall({ id: 't2', name: 'do_thing', input: { n: 2 } })
+        cb.onDone()
+      },
+    ])
+    const onToolExecuted = vi.fn()
+    let loop: AgentLoop | null = null
+    const skill = makeSkill(() => {
+      loop?.cancel()
+      return { output: 'edited page 1', summary: 'Edited page 1', mutated: true }
+    })
+    loop = new AgentLoop({ transport, skill, events: { onToolExecuted } })
+    loop.run('edit twice')
+    await flush()
+    await flush()
+
+    // The executed call keeps its real result; the queued one is reported as skipped
+    expect(onToolExecuted).toHaveBeenCalledTimes(2)
+    expect(onToolExecuted.mock.calls[0]![0].execution).toEqual({
+      output: 'edited page 1',
+      summary: 'Edited page 1',
+      mutated: true,
+    })
+    const skippedEvent = onToolExecuted.mock.calls[1]![0]
+    expect(skippedEvent.call.id).toBe('t2')
+    expect(skippedEvent.execution.skipped).toBe(true)
+    expect(skippedEvent.execution.isError).toBe(true)
+    // Tool/result pairing still holds for the next request
+    const toolMsg = loop.messages[2] as Extract<AgentMessage, { role: 'tool' }>
+    expect(toolMsg.results.map((r) => r.id)).toEqual(['t1', 't2'])
+    expect(toolMsg.results.map((r) => r.isError)).toEqual([undefined, true])
+  })
+
+  it('settles a deferred mutation after stop and reports its actual result', async () => {
+    // An edit tool that resolves *after* the cancel: the write really happens, so
+    // the UI must learn about it (never "cancelled before anything ran").
+    const transport = scriptedTransport([
+      (cb) => {
+        cb.onToolCall({ id: 'edit', name: 'do_thing', input: {} })
+        cb.onToolCall({ id: 'next', name: 'do_thing', input: {} })
+        cb.onDone()
+      },
+    ])
+    const onToolExecuted = vi.fn()
+    const onDone = vi.fn()
+    let release: (() => void) | null = null
+    let loop: AgentLoop | null = null
+    const skill = makeSkill(
+      () =>
+        new Promise<ToolExecution>((resolve) => {
+          release = () =>
+            resolve({ output: 'page rewritten', summary: 'Rewrote page 2', mutated: true })
+          queueMicrotask(() => loop?.cancel())
+        }),
+    )
+    loop = new AgentLoop({ transport, skill, events: { onToolExecuted, onDone } })
+    loop.run('rewrite page 2')
+    await flush()
+    await flush()
+    // still inside the tool: the run has not settled yet
+    expect(onDone).not.toHaveBeenCalled()
+    release!()
+    await flush()
+    await flush()
+
+    const executed = onToolExecuted.mock.calls.map((call) => call[0].execution)
+    expect(executed[0]).toEqual({
+      output: 'page rewritten',
+      summary: 'Rewrote page 2',
+      mutated: true,
+    })
+    expect(executed[1].skipped).toBe(true)
+    expect(onDone).toHaveBeenCalledWith({ text: '', cancelled: true, turnLimit: false })
+  })
+
+  it('passes the partial answer text with onError (defect: errors replaced partial text)', async () => {
+    const transport = scriptedTransport([
+      (cb) => {
+        cb.onDelta('First half of the answer')
+        cb.onError('provider dropped the connection')
+      },
+    ])
+    const onError = vi.fn()
+    const loop = new AgentLoop({ transport, skill: makeSkill(), events: { onError } })
+    loop.run('explain the document')
+    await flush()
+    expect(onError).toHaveBeenCalledWith(
+      'provider dropped the connection',
+      'First half of the answer',
+    )
+  })
+
+  it('omits the partial-text argument when nothing streamed', async () => {
+    const transport = scriptedTransport([(cb) => cb.onError('Not signed in')])
+    const onError = vi.fn()
+    const loop = new AgentLoop({ transport, skill: makeSkill(), events: { onError } })
+    loop.run('x')
+    await flush()
+    expect(onError.mock.calls[0]).toEqual(['Not signed in'])
   })
 })
 

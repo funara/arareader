@@ -7,6 +7,7 @@ export type {
   ProjectInfo,
   ProjectSummary,
   ToolActivity,
+  ToolLink,
 } from './types.js'
 export type {
   AppendChatArgs,
@@ -15,4 +16,7 @@ export type {
   RebindChatArgs,
   ResolveChatArgs,
   ResolveChatResult,
+  StartNewChatArgs,
+  StartNewChatResult,
 } from './ipc.js'
+export { parseAppendChatArgs } from './ipc.js'

@@ -46,7 +46,12 @@ export interface AgentLoopEvents<TSnapshot> {
   /** a turn requested tools and they ran; the loop is going back to the model */
   onTurnEnd?(): void
   onDone?(result: AgentRunResult): void
-  onError?(error: string): void
+  /**
+   * Terminal failure of the run. `partialText` is the sanitized text streamed
+   * before the failure (absent when the failing turn streamed nothing), so UIs
+   * can keep the partial answer instead of replacing it with the error.
+   */
+  onError?(error: string, partialText?: string): void
 }
 
 /** Context compaction config (budget tracked in UTF-8 bytes rather than message count) */
@@ -575,7 +580,11 @@ export class AgentLoop<TSnapshot = unknown> {
           settled = true
           this.running = false
           this.rollbackFailedRun()
-          this.options.events?.onError?.(error)
+          const partialText = this.turnText ? sanitizeModelIdentity(this.turnText) : ''
+          // only pass the extra argument when there is text: keeps the event
+          // arity (and existing exact-argument assertions) unchanged
+          if (partialText) this.options.events?.onError?.(error, partialText)
+          else this.options.events?.onError?.(error)
         },
       },
     )
@@ -633,21 +642,21 @@ export class AgentLoop<TSnapshot = unknown> {
       // The user hit stop while an earlier tool was running: skip remaining tools,
       // but fill in paired error results to keep tool_use/tool_result pairs valid for the next request
       if (this.cancelled) {
-        results.push({
-          id: call.id,
-          name: call.name,
-          output: '(the user stopped the run; this tool was not executed)',
-          isError: true,
+        const output = '(the user stopped the run; this tool was not executed)'
+        results.push({ id: call.id, name: call.name, output, isError: true })
+        events?.onToolExecuted?.({
+          call,
+          execution: { output, isError: true, skipped: true, summary: call.name },
         })
         continue
       }
       if (this.stuck) {
-        results.push({
-          id: call.id,
-          name: call.name,
-          output:
-            '(the run stopped after repeated no-progress tool calls; this tool was not executed)',
-          isError: true,
+        const output =
+          '(the run stopped after repeated no-progress tool calls; this tool was not executed)'
+        results.push({ id: call.id, name: call.name, output, isError: true })
+        events?.onToolExecuted?.({
+          call,
+          execution: { output, isError: true, skipped: true, summary: call.name },
         })
         continue
       }
@@ -664,6 +673,7 @@ export class AgentLoop<TSnapshot = unknown> {
           execution: {
             output: `(Tool call budget of ${effectiveMaxToolCalls} reached)`,
             isError: true,
+            skipped: true,
             summary: call.name,
           },
         })
@@ -739,9 +749,10 @@ export class AgentLoop<TSnapshot = unknown> {
     if (this.inputParseFails >= MAX_INPUT_PARSE_RETRIES) {
       this.running = false
       this.rollbackFailedRun()
-      events?.onError?.(
-        `Tool input was unusable (unparseable or truncated) ${MAX_INPUT_PARSE_RETRIES} times in a row; retries stopped, please send the request again`,
-      )
+      const error = `Tool input was unusable (unparseable or truncated) ${MAX_INPUT_PARSE_RETRIES} times in a row; retries stopped, please send the request again`
+      const partialText = this.turnText ? sanitizeModelIdentity(this.turnText) : ''
+      if (partialText) events?.onError?.(error, partialText)
+      else events?.onError?.(error)
       return
     }
     this.turns++

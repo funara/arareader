@@ -41,6 +41,7 @@ export const PROJECT_CHANNELS = {
   appendChat: 'project:appendChat',
   loadChat: 'project:loadChat',
   rebindChat: 'project:rebindChat',
+  startNewChat: 'project:startNewChat',
 } as const
 
 /** Lowercased image extensions sent to the model multimodally (no text extraction). */
@@ -101,10 +102,10 @@ export interface ReaderAiApi {
   onConfigureRequest(handler: () => void): () => void
 }
 
-/** `window.readerProject` (PDF views) — the four read/write history calls. */
+/** `window.readerProject` (PDF views) — the per-document history calls. */
 export type ReaderProjectApi = Pick<
   ProjectApi,
-  'resolveChat' | 'appendChat' | 'loadChat' | 'rebindChat'
+  'resolveChat' | 'appendChat' | 'loadChat' | 'rebindChat' | 'startNewChat'
 >
 
 export type { AiSettings, AiStreamChunk, AiStreamRequest }

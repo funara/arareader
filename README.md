@@ -90,7 +90,7 @@ updater point there.
 - **Document tools:** `read_pages`, `search_text`, `goto_page`, `get_outline`, `list_form_fields`, `fill_form_field`, `rotate_page`, `delete_page`, `markup_text`. Its writes appear in the document immediately and are undoable like toolbar edits.
 - **Attachments:** pick one file, drop it on the panel, or paste an image. PDF, DOCX, PPTX, XLSX, and plain text are parsed locally; images are sent multimodally. One attachment per chat.
 - **Web search and fetch** through the bundled search drivers (HTML search endpoints; no extra API key), with citations. Fetched pages are treated as untrusted context; private, loopback, and link-local addresses are refused.
-- **Per-document history:** one JSONL transcript per file path, restored read-only when the PDF is reopened, continued on new turns, and re-bound to the new path on Save As.
+- **Per-document history:** one JSONL transcript per file path. Reopening a PDF restores the **active** conversation for a follow-up (bounded, sanitized, with completed actions stated as outcomes rather than replayed), while conversations closed with **New chat** stay visible in the panel but never re-enter the model context and are never deleted. Stopped and failed turns, including completed actions, are recorded. Save As re-binds the transcript to the new path and preserves the conversation boundary even when histories merge.
 
 ---
 
@@ -141,11 +141,12 @@ ARAReader is engineered from the ground up on an uncompromising privacy-first pr
 
 ### 3. Strict Network Boundary
 
-Network communication is strictly gated and limited to explicit, user-initiated actions:
+Network communication is strictly gated and limited to the actions below:
 
 1. **Configured AI Endpoint:** Direct communication with the API endpoint you choose (e.g. Google AI Studio, custom OpenAI-compatible server, or local Ollama).
 2. **Explicit Web Search & Page Fetch:** Powered by `@arareader/ai-search` only when you explicitly ask the assistant to search the web, with strict SSRF blocklists denying private, loopback, and local network ranges on every redirect hop.
 3. **Application Updates:** Transparent GitHub release check (packaged Windows and macOS builds only, checked 5 seconds after launch and every 4 hours; or on demand via `Help → Check for Updates…`).
+4. **Adaptive Prompt Suggestions (on by default, optional):** When a PDF is opened and AI is connected, ARAReader sends the document name, page count, outline titles, and at most 1,200 characters from the first three pages to your configured AI provider to tailor the suggested prompts. The request is wrapped in explicit untrusted-content delimiters and is never sent to ARA servers. Disable it in `Settings → Preferences → Adaptive AI recommendations on document open`.
 
 > [!TIP]
 > For legal firms, medical practices, researchers, and enterprises handling confidential PDFs, ARAReader provides absolute compliance peace of mind: zero telemetry means zero risk of data leakage.

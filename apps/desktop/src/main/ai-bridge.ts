@@ -32,12 +32,12 @@ import type {
 import { webExtract, webSearch } from '@arareader/ai-search'
 import { atomicWriteFile, showOpenDialogWithMemory } from '@arareader/electron-utils'
 import { parseFileToText } from '@arareader/file-parse'
-import { ProjectStore } from '@arareader/project-store'
+import { ProjectStore, parseAppendChatArgs } from '@arareader/project-store'
 import type {
-  AppendChatArgs,
   LoadChatArgs,
   RebindChatArgs,
   ResolveChatArgs,
+  StartNewChatArgs,
 } from '@arareader/project-store'
 import {
   AI_CHANNELS,
@@ -692,38 +692,40 @@ export function registerAiBridge(options: AiBridgeOptions = {}): void {
     const store = getProjectStore()
     store.ensureDefaultProject()
     if (!filePath) {
-      return { projectId: 'default', chatId: tempChatId ?? `unsaved-${Date.now()}` }
+      const chatId = tempChatId ?? `unsaved-${Date.now()}`
+      return { projectId: 'default', chatId, boundarySeq: store.chatBoundary(chatId) }
     }
     return store.resolveChatForFile(filePath)
   })
 
-  ipcMain.handle(PROJECT_CHANNELS.appendChat, (_event, args: AppendChatArgs) => {
-    if (!args || typeof args.projectId !== 'string' || typeof args.chatId !== 'string') return false
-    if (typeof args.text !== 'string') return false
-    if (args.role !== 'user' && args.role !== 'assistant') return false
-    const message: Parameters<ProjectStore['appendChatMessage']>[2] = {
-      role: args.role,
-      text: args.text,
-    }
-    if (Array.isArray(args.tools) && args.tools.length > 0) message.tools = args.tools
-    if (Array.isArray(args.attachments) && args.attachments.length > 0) {
-      message.attachments = args.attachments
-    }
+  ipcMain.handle(PROJECT_CHANNELS.appendChat, (_event, args: unknown) => {
+    const parsed = parseAppendChatArgs(args)
+    if (!parsed) return false
     try {
-      return getProjectStore().appendChatMessage(args.projectId, args.chatId, message)
+      return getProjectStore().appendChatMessage(parsed.projectId, parsed.chatId, parsed.message)
     } catch {
       return false
     }
   })
 
+  // Durable conversation boundary: earlier messages stay on disk, later ones
+  // belong to the new conversation. Nothing is deleted on New chat.
+  ipcMain.handle(PROJECT_CHANNELS.startNewChat, (_event, args: StartNewChatArgs) => {
+    const projectId =
+      typeof args?.projectId === 'string' && args.projectId ? args.projectId : 'default'
+    const chatId = typeof args?.chatId === 'string' ? args.chatId : ''
+    if (!chatId) return { projectId, chatId, boundarySeq: 0 }
+    // A rejected write must reach the renderer: the panel shows a retryable banner
+    // instead of silently losing the New-chat boundary.
+    return { projectId, chatId, boundarySeq: getProjectStore().startNewChat(projectId, chatId) }
+  })
+
   ipcMain.handle(PROJECT_CHANNELS.loadChat, (_event, args: LoadChatArgs) => {
     if (!args || typeof args.projectId !== 'string' || typeof args.chatId !== 'string') return []
     const limit = typeof args.limit === 'number' && args.limit > 0 ? args.limit : 200
-    try {
-      return getProjectStore().loadChat(args.projectId, args.chatId, limit)
-    } catch {
-      return []
-    }
+    // A read failure rejects instead of returning []: an empty list would tell the
+    // panel the conversation was empty and silently lose the earlier messages.
+    return getProjectStore().loadChat(args.projectId, args.chatId, limit)
   })
 
   ipcMain.handle(PROJECT_CHANNELS.rebindChat, (_event, args: RebindChatArgs) => {
@@ -739,9 +741,12 @@ export function registerAiBridge(options: AiBridgeOptions = {}): void {
       if (typeof args?.newChatId === 'string' && args.newChatId) {
         store.rebindChat(projectId, tempChatId, args.newChatId)
       }
-      return { projectId, chatId: args?.newChatId ?? tempChatId }
+      const chatId = args?.newChatId ?? tempChatId
+      return { projectId, chatId, boundarySeq: store.chatBoundary(chatId) }
     } catch (err) {
       console.warn('[ai-bridge] project rebindChat failed:', err)
+      // No boundarySeq: the caller must treat the boundary as unknown, not as
+      // "never cut" (0 would re-seed the closed conversation into the model)
       return { projectId, chatId: args?.newChatId ?? tempChatId }
     }
   })

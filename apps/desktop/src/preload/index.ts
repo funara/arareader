@@ -244,6 +244,9 @@ const projectApi: ReaderProjectApi = {
   async rebindChat(args) {
     return ipcRenderer.invoke(PROJECT_CHANNELS.rebindChat, args)
   },
+  async startNewChat(args) {
+    return ipcRenderer.invoke(PROJECT_CHANNELS.startNewChat, args)
+  },
 }
 
 contextBridge.exposeInMainWorld('readerProject', projectApi)

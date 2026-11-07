@@ -417,7 +417,7 @@ async function fillFormField(
   if (kind === 'checkbox') {
     const checked = CHECKBOX_ALIASES.has(raw.toLowerCase())
     deps.applyFormEdit({ name, kind, checked })
-    return { output: `Checked "${name}"`, summary }
+    return { output: `Checked "${name}"`, summary, mutated: true }
   }
   if (raw === '') return err(`Empty value for "${name}"`, summary)
   if (kind === 'radio' || kind === 'choice') {
@@ -429,10 +429,10 @@ async function fillFormField(
       )
     }
     deps.applyFormEdit({ name, kind, value: raw })
-    return { output: `Set "${name}" to "${raw}"`, summary }
+    return { output: `Set "${name}" to "${raw}"`, summary, mutated: true }
   }
   deps.applyFormEdit({ name, kind: 'text', value: raw })
-  return { output: `Set "${name}" to "${raw}"`, summary }
+  return { output: `Set "${name}" to "${raw}"`, summary, mutated: true }
 }
 
 /** Validate a 1-based page number; returns the original page index or an error */
@@ -533,6 +533,7 @@ async function rotatePage(
   return {
     output: `Rotated page ${page} ${dir === 90 ? 'clockwise' : 'counter-clockwise'}`,
     summary,
+    mutated: true,
   }
 }
 
@@ -547,7 +548,7 @@ async function deletePageTool(
   if (!deps.deletePage(r.origIdx)) {
     return err('Deleting every page is not allowed — one page has to remain', summary)
   }
-  return { output: `Removed page ${page}`, summary }
+  return { output: `Removed page ${page}`, summary, mutated: true }
 }
 
 async function markupText(
@@ -601,7 +602,11 @@ async function markupText(
     lines.push(`(${matches.length - capped.length} more matches were left unmarked)`)
   }
   lines.push(`(${marks} marks added across ${pages.length} page${pages.length === 1 ? '' : 's'})`)
-  return { output: lines.join('\n'), summary: t('aiToolMarkup', { page: pages[0]! }) }
+  return {
+    output: lines.join('\n'),
+    summary: t('aiToolMarkup', { page: pages[0]! }),
+    mutated: true,
+  }
 }
 
 /** Notes, text replacements, outlines and metadata: the additive write tools */

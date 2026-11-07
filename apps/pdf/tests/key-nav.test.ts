@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { navAction } from '../src/renderer/keyNav'
+import { navAction, ownsNavKeys } from '../src/renderer/keyNav'
 
 describe('navAction', () => {
   it('steps a whole page on ArrowDown/ArrowUp when focus is in the thumbnail sidebar', () => {
@@ -34,5 +34,36 @@ describe('navAction', () => {
     expect(navAction('a', false)).toBeNull()
     expect(navAction('Enter', true)).toBeNull()
     expect(navAction('Tab', false)).toBeNull()
+  })
+})
+
+describe('ownsNavKeys (focused scroll regions keep their arrow keys)', () => {
+  const box = (tabIndex: string | null, overflow: string, scrollWidth = 0): HTMLElement => {
+    const el = document.createElement('div')
+    if (tabIndex !== null) el.setAttribute('tabindex', tabIndex)
+    el.style.overflowX = overflow
+    Object.defineProperty(el, 'scrollWidth', { value: scrollWidth, configurable: true })
+    Object.defineProperty(el, 'clientWidth', { value: 200, configurable: true })
+    return el
+  }
+
+  it('lets a focusable, overflowing region own the navigation keys', () => {
+    expect(ownsNavKeys(box('0', 'auto', 640))).toBe(true)
+  })
+
+  it('ignores elements that are not explicitly focusable (buttons, prose)', () => {
+    expect(ownsNavKeys(box(null, 'auto', 640))).toBe(false)
+  })
+
+  it('ignores a focusable element that does not overflow', () => {
+    expect(ownsNavKeys(box('0', 'auto', 120))).toBe(false)
+  })
+
+  it('ignores a focusable element that cannot scroll', () => {
+    expect(ownsNavKeys(box('0', 'hidden', 640))).toBe(false)
+  })
+
+  it('is safe with no target', () => {
+    expect(ownsNavKeys(null)).toBe(false)
   })
 })

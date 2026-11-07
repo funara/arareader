@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useEffect, useRef } from 'react'
+import { useEffect, useId, useRef } from 'react'
 import { IconArrowUp, IconSend, IconStop } from './icons'
 
 // Keep in sync with the CSS `max-height` on `.ai-input-box textarea` (7 lines à 20px)
@@ -15,6 +15,8 @@ export function AiComposer({
   value,
   busy,
   disabled = false,
+  sendBlocked = false,
+  sendBlockedHint,
   placeholder,
   hintIdle,
   hintBusy,
@@ -39,6 +41,14 @@ export function AiComposer({
   readonly value: string
   readonly busy: boolean
   readonly disabled?: boolean
+  /**
+   * Refuse the send action while leaving the textarea usable: history
+   * initialization or a pending New-chat boundary may not accept a message yet,
+   * but the user can keep composing (nothing they type is lost).
+   */
+  readonly sendBlocked?: boolean | undefined
+  /** why sending is refused (send button tooltip); the hint stays visible otherwise */
+  readonly sendBlockedHint?: string | undefined
   readonly placeholder: string
   readonly hintIdle: string
   readonly hintBusy: string
@@ -69,7 +79,8 @@ export function AiComposer({
 }): React.JSX.Element {
   const innerRef = useRef<HTMLTextAreaElement | null>(null)
   const ref = textareaRef ?? innerRef
-  const canSend = value.trim().length > 0 && !busy && !disabled
+  const canSend = value.trim().length > 0 && !busy && !disabled && !sendBlocked
+  const shortcutId = useId()
 
   // auto-grow up to ~6 lines; empty clears the inline height outright so the
   // CSS min-height governs (a hidden-at-measure pass can leave a stale value).
@@ -96,6 +107,7 @@ export function AiComposer({
           value={value}
           placeholder={placeholder}
           aria-label={ariaLabel}
+          aria-describedby={iconOnly ? shortcutId : undefined}
           rows={1}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={(e) => {
@@ -122,6 +134,13 @@ export function AiComposer({
               {busy ? hintBusy : hintIdle}
             </span>
           )}
+          {/* The compact composer hides the hint visually; keep the same guidance
+              for screen readers instead of dropping it. */}
+          {iconOnly && (
+            <span id={shortcutId} className="ai-sr-only">
+              {busy ? hintBusy : hintIdle}
+            </span>
+          )}
           {/*
             Holds the send button against the right edge. The hint alone cannot do
             it: it renders only when !iconOnly (every app passes iconOnly), and each
@@ -144,7 +163,7 @@ export function AiComposer({
               className="ai-send-btn"
               onClick={onSend}
               disabled={!canSend}
-              title={sendLabel}
+              title={sendBlocked && sendBlockedHint ? sendBlockedHint : sendLabel}
               aria-label={sendLabel}
             >
               {iconOnly ? (

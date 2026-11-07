@@ -476,6 +476,7 @@ export const PROJECT_CHANNELS = {
   appendChat: 'project:appendChat',
   loadChat: 'project:loadChat',
   rebindChat: 'project:rebindChat',
+  startNewChat: 'project:startNewChat',
 } as const
 
 /** Extensions sent multimodally as images rather than parsed as text */
@@ -612,5 +613,5 @@ export interface PdfApi {
 /** Per-document chat history the PDF preload exposes as window.pdfProject */
 export type PdfProjectApi = Pick<
   ProjectApi,
-  'resolveChat' | 'appendChat' | 'loadChat' | 'rebindChat'
+  'resolveChat' | 'appendChat' | 'loadChat' | 'rebindChat' | 'startNewChat'
 >
