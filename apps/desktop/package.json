@@ -1,7 +1,7 @@
 {
   "name": "@arareader/desktop",
   "productName": "ARAReader",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "license": "GPL-3.0-or-later",
   "private": true,
   "description": "ARAReader desktop host: PDF tabs, home, menus, and window lifecycle",

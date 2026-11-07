@@ -24,6 +24,11 @@ export function rowOfVisIdx(visIdx: number, spread: 1 | 2): number {
   return spread === 1 ? visIdx : Math.floor(visIdx / 2)
 }
 
+/** Paged view: the row holding a 1-based page, clamped into the document */
+export function pageRow(page: number, pageCount: number, spread: 1 | 2): number {
+  return rowOfVisIdx(Math.max(1, Math.min(page, pageCount)) - 1, spread)
+}
+
 /** Arrow/thumbnail page stepping moves one whole row (a pair in two-page mode —
     stepping a single page inside a pair would not scroll and reads as a dead key).
     `page` is the 1-based visible page number; returns the row-first page to land on. */

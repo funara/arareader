@@ -52,6 +52,8 @@ export const PDF_CHANNELS = {
   dirtyChanged: 'pdf:dirty-changed',
   readModeChanged: 'pdf:read-mode-changed',
   exitReadMode: 'pdf:exit-read-mode',
+  viewModeChanged: 'pdf:view-mode-changed',
+  setViewMode: 'pdf:set-view-mode',
   closeSaveRequest: 'pdf:close-save-request',
   closeSaveResult: 'pdf:close-save-result',
   getLanguage: 'app:get-language',
@@ -570,6 +572,10 @@ export interface PdfApi {
   setDirty(dirty: boolean): void
   setReadMode(reading: boolean): void
   onExitReadMode(handler: () => void): () => void
+  /** Publish the paged/continuous view state so the host tab strip can mirror it */
+  setViewModeState(paged: boolean): void
+  /** Host requests an explicit view mode (read-mode header switch) */
+  onSetViewMode(handler: (paged: boolean) => void): () => void
   /** Main process picked "Save" in the close prompt → renderer saves and replies via sendCloseSaveResult */
   onCloseSaveRequest(handler: () => void): () => void
   sendCloseSaveResult(ok: boolean): void

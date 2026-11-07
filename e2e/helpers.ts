@@ -27,6 +27,8 @@ interface LaunchOptions {
   openFile?: string
   /** if true, start with empty settings to test onboarding flow */
   testOnboarding?: boolean
+  /** simulate an update in the unpacked app */
+  fakeUpdate?: string
 }
 
 export interface LaunchedApp {
@@ -84,6 +86,7 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
       ...hostEnv,
       ARAREADER_USER_DATA: userDataDir,
       ARAREADER_LANG: options.lang ?? 'en',
+      ARAREADER_FAKE_UPDATE: options.fakeUpdate ?? '',
       ...(process.platform === 'linux' ? { ELECTRON_DISABLE_SANDBOX: '1' } : {}),
     },
   })

@@ -14,6 +14,8 @@ interface TabRecord {
   title: string
   filePath?: string
   reading?: boolean
+  /** renderer-reported view mode; absent until the PDF reports */
+  paged?: boolean
 }
 
 const HOME_ID = 'home'
@@ -108,6 +110,7 @@ export class TabManager {
       closable: tab.id !== HOME_ID,
       active: tab.id === this.activeId,
       reading: tab.reading ?? false,
+      paged: tab.paged ?? false,
     }))
   }
 
@@ -153,6 +156,22 @@ export class TabManager {
     const tab = this.activeTab()
     if (tab?.reading && tab.view && !tab.view.webContents.isDestroyed()) {
       tab.view.webContents.send(PDF_CHANNELS.exitReadMode)
+    }
+  }
+
+  /** PDF renderer is authoritative for its view mode; mirror it for the tab strip */
+  setPagedFor(webContentsId: number, paged: boolean): void {
+    const tab = this.tabs.find((item) => item.view?.webContents.id === webContentsId)
+    if (!tab || tab.paged === paged) return
+    tab.paged = paged
+    this.onChanged()
+  }
+
+  /** Read-mode header asks the active PDF to switch; the PDF's report updates the strip */
+  setActiveViewMode(paged: boolean): void {
+    const tab = this.activeTab()
+    if (tab?.kind === 'pdf' && tab.reading && tab.view && !tab.view.webContents.isDestroyed()) {
+      tab.view.webContents.send(PDF_CHANNELS.setViewMode, paged)
     }
   }
 

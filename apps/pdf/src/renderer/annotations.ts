@@ -79,20 +79,24 @@ export function quadToRect(q: number[]): [number, number, number, number] {
 /**
  * Current selection → PDF-coordinate quads grouped by visible page (y up; each quad
  * [x1,yMax,x2,yMax,x1,yMin,x2,yMin]). Returns null when the selection is empty.
- * geoms map 1:1 to .pdf-page elements and include rotation conversion.
+ * geoms map 1:1 to visList positions; with origList, DOM pages are matched by their
+ * data-orig-idx instead of mount order (paged view mounts only one row).
  */
 export function selectionQuadsByPage(
   scrollEl: HTMLElement,
   geoms: PageGeom[],
   scale: number,
+  origList?: readonly number[],
 ): Map<number, number[][]> | null {
   const sel = window.getSelection()
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null
   const range = sel.getRangeAt(0)
   if (!scrollEl.contains(range.commonAncestorContainer)) return null
 
-  const pageEls = [...scrollEl.querySelectorAll<HTMLElement>('.pdf-page')]
-  const pageRects = pageEls.map((el) => el.getBoundingClientRect())
+  const pages = [...scrollEl.querySelectorAll<HTMLElement>('.pdf-page')].map((el, domIdx) => ({
+    rect: el.getBoundingClientRect(),
+    visIdx: origList ? origList.indexOf(Number(el.dataset.origIdx)) : domIdx,
+  }))
 
   // Selection rects mix element-level big boxes with overlapping span-level ones: drop boxes containing others, then dedupe by pixel
   const raw = [...range.getClientRects()].filter((r) => r.width > 1 && r.height > 1)
@@ -114,23 +118,28 @@ export function selectionQuadsByPage(
   for (const r of rects) {
     const cx = (r.left + r.right) / 2
     const cy = (r.top + r.bottom) / 2
-    const idx = pageRects.findIndex(
-      (p) => cx >= p.left && cx <= p.right && cy >= p.top && cy <= p.bottom,
+    const page = pages.find(
+      (p) =>
+        p.visIdx >= 0 &&
+        cx >= p.rect.left &&
+        cx <= p.rect.right &&
+        cy >= p.rect.top &&
+        cy <= p.rect.bottom,
     )
-    if (idx < 0 || !geoms[idx]) continue
-    const p = pageRects[idx]!
-    const g = geoms[idx]!
+    if (!page || !geoms[page.visIdx]) continue
+    const p = page.rect
+    const g = geoms[page.visIdx]!
     const [ax, ay] = viewToPdf(g, (r.left - p.left) / scale, (r.top - p.top) / scale)
     const [bx, by] = viewToPdf(g, (r.right - p.left) / scale, (r.bottom - p.top) / scale)
     const [x1, x2] = [Math.min(ax, bx), Math.max(ax, bx)]
     const [yMin, yMax] = [Math.min(ay, by), Math.max(ay, by)]
-    const key = `${idx}:${Math.round(x1)}:${Math.round(x2)}:${Math.round(yMin)}:${Math.round(yMax)}`
+    const key = `${page.visIdx}:${Math.round(x1)}:${Math.round(x2)}:${Math.round(yMin)}:${Math.round(yMax)}`
     if (seen.has(key)) continue
     seen.add(key)
     const quad = [x1, yMax, x2, yMax, x1, yMin, x2, yMin]
-    const list = byPage.get(idx)
+    const list = byPage.get(page.visIdx)
     if (list) list.push(quad)
-    else byPage.set(idx, [quad])
+    else byPage.set(page.visIdx, [quad])
   }
   return byPage.size > 0 ? byPage : null
 }

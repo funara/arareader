@@ -26,6 +26,47 @@ async function closePdfTabs(page: Page): Promise<string[]> {
 }
 
 test.describe('home screen', () => {
+  test('centers the update-ready message while keeping Later and Escape available', async () => {
+    const launched = await launchApp({ fakeUpdate: '0.2.1' })
+    const { page } = launched
+    try {
+      const modal = page.getByRole('dialog', { name: 'Update ready' })
+      await expect(modal).toBeVisible({ timeout: 20_000 })
+      await expect(modal.locator('.update-eyebrow-pill')).toHaveText('v0.2.1')
+      await expect(modal.getByRole('heading', { name: 'Update ready to install' })).toBeVisible()
+      await expect(modal.getByRole('button', { name: 'Restart Now' })).toBeFocused()
+      const centerOffsets = await modal.evaluate((el) => {
+        const center = (node: Element) => {
+          const rect = node.getBoundingClientRect()
+          return rect.left + rect.width / 2
+        }
+        const modalCenter = center(el)
+        return ['.update-eyebrow-pill', '.update-badge-icon', '.update-modal-title'].map(
+          (selector) => center(el.querySelector(selector)!) - modalCenter,
+        )
+      })
+      for (const offset of centerOffsets) expect(Math.abs(offset)).toBeLessThan(1)
+      await page.screenshot({ path: screenshotPath('update-restart-light') })
+      await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'))
+      await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+      await page.screenshot({ path: screenshotPath('update-restart-dark') })
+      await page.setViewportSize({ width: 360, height: 700 })
+      await expect(modal.getByRole('button', { name: 'Later' })).toBeInViewport()
+      await page.screenshot({ path: screenshotPath('update-restart-narrow') })
+      await modal.getByRole('button', { name: 'Later' }).click()
+      await expect(modal).toHaveCount(0)
+      await page.locator('.sidebar-version-btn').click()
+      await expect(modal).toBeVisible()
+      await page.keyboard.press('Escape')
+      await expect(modal).toHaveCount(0)
+      await page.locator('.sidebar-version-btn').click()
+      await modal.getByRole('button', { name: 'Close' }).click()
+      await expect(modal).toHaveCount(0)
+    } finally {
+      await closeReader(launched)
+    }
+  })
+
   test('shows the home surface and opens the AI provider dialog', async () => {
     const launched = await launchApp()
     const { page } = launched

@@ -41,6 +41,12 @@ const api: PdfApi = {
     ipcRenderer.on(PDF_CHANNELS.exitReadMode, listener)
     return () => ipcRenderer.removeListener(PDF_CHANNELS.exitReadMode, listener)
   },
+  setViewModeState: (paged) => ipcRenderer.send(PDF_CHANNELS.viewModeChanged, paged),
+  onSetViewMode: (handler) => {
+    const listener = (_e: Electron.IpcRendererEvent, paged: boolean) => handler(paged)
+    ipcRenderer.on(PDF_CHANNELS.setViewMode, listener)
+    return () => ipcRenderer.removeListener(PDF_CHANNELS.setViewMode, listener)
+  },
   onCloseSaveRequest: (handler) => {
     const listener = () => handler()
     ipcRenderer.on(PDF_CHANNELS.closeSaveRequest, listener)

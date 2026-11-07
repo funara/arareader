@@ -184,4 +184,14 @@ describe('selectionQuadsByPage', () => {
     const result = selectionQuadsByPage(scrollEl, [geom(0)], 2)
     expect(result!.get(0)).toEqual([[10, 180, 50, 180, 10, 170, 50, 170]])
   })
+
+  it('matches pages by data-orig-idx when paged view mounts only one row', () => {
+    const { scrollEl, pageEl } = setupPage()
+    pageEl.dataset.origIdx = '3'
+    mockSelection(scrollEl, [domRect(10, 20, 50, 30)])
+    // visList position 1 holds original page 3; the mounted DOM page must map there
+    const result = selectionQuadsByPage(scrollEl, [geom(0), geom(0)], 1, [7, 3])
+    expect(result!.has(0)).toBe(false)
+    expect(result!.get(1)).toEqual([[10, 180, 50, 180, 10, 170, 50, 170]])
+  })
 })

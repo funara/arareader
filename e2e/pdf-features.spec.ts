@@ -1117,6 +1117,118 @@ test.describe('direct content editing', () => {
   })
 })
 
+test.describe('view modes', () => {
+  test('flips between continuous scrolling and whole-page turns', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'arareader-view-'))
+    const path = join(dir, 'document.pdf')
+    const second = join(dir, 'second.pdf')
+    await writeTestPdf(path, 3, 'Hello world')
+    await writeTestPdf(second, 1)
+
+    const launched = await launchApp({ openFile: path })
+    const { app, page } = launched
+    const crashes: string[] = []
+    page.on('pageerror', (error) => crashes.push(String(error)))
+
+    try {
+      const pdf = await waitForPageWithUrl(app, 'pdf/out')
+      pdf.on('pageerror', (error) => crashes.push(String(error)))
+      await expect(pdf.locator('.ribbon')).toBeVisible()
+
+      await expect(pdf.locator('.pdf-page')).toHaveCount(3)
+
+      // Enter paged mode from page 3: the page on screen carries over
+      await pdf.locator('.pdf-thumb').nth(2).click()
+      await expect(pdf.locator('.status-item')).toContainText('Page 3 of 3')
+      await pdf.locator('.ribbon-tab', { hasText: 'View' }).click()
+      const paged = pdf.locator('.rb-big[title="Page by page"]')
+      await paged.click()
+      await expect(paged).toHaveAttribute('aria-pressed', 'true')
+      await expect(pdf.locator('.pdf-page:visible')).toHaveAttribute('data-orig-idx', '2')
+
+      // Search jumps to the page that holds the match
+      await pdf.keyboard.press(process.platform === 'darwin' ? 'Meta+f' : 'Control+f')
+      await pdf.locator('.pdf-search-input').fill('Hello')
+      await expect(pdf.locator('.pdf-page:visible')).toHaveAttribute('data-orig-idx', '0')
+      await pdf.keyboard.press('Escape')
+      await expect(pdf.locator('.pdf-search-bar')).toHaveCount(0)
+
+      // An in-progress content edit survives turning away from its page
+      await pdf.locator('.rb-big[title="Edit PDF"]').click()
+      await pdf.locator('.pdf-content-block').first().click()
+      const editor = pdf.locator('.pdf-content-editor-text')
+      await editor.fill('Draft while paged')
+      await pdf.locator('.pdf-thumb').nth(1).click()
+      // The draft-bearing row stays mounted but hidden, so only one page is on screen
+      await expect(pdf.locator('.pdf-page:visible')).toHaveAttribute('data-orig-idx', '1')
+      await pdf.locator('.pdf-thumb').first().click()
+      await expect(editor).toBeVisible()
+      await expect(editor).toHaveValue('Draft while paged')
+
+      // Whole-page turns stay clamped at the document ends
+      await pdf.locator('.pdf-thumb').nth(2).click()
+      await pdf.locator('.pdf-scroll').hover()
+      await pdf.mouse.wheel(0, 400)
+      await expect(pdf.locator('.pdf-page:visible')).toHaveAttribute('data-orig-idx', '2')
+      await pdf.keyboard.press('PageDown')
+      await expect(pdf.locator('.pdf-page:visible')).toHaveAttribute('data-orig-idx', '2')
+      await pdf.mouse.wheel(0, -400)
+      await expect(pdf.locator('.pdf-page:visible')).toHaveAttribute('data-orig-idx', '1')
+      await pdf.keyboard.press('PageDown')
+      await expect(pdf.locator('.pdf-page:visible')).toHaveAttribute('data-orig-idx', '2')
+
+      // Footer switch: back to continuous, then paged again for Read mode
+      const footerSwitch = pdf.locator('.status-view-switch')
+      await footerSwitch.locator('[title="Continuous"]').click()
+      await expect(footerSwitch.locator('[title="Continuous"]')).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      )
+      await expect(pdf.locator('.pdf-page')).toHaveCount(3)
+      await expect(pdf.locator('.status-item')).toContainText('Page 3 of 3')
+      await footerSwitch.locator('[title="Page by page"]').click()
+      await expect(pdf.locator('.pdf-page:visible')).toHaveAttribute('data-orig-idx', '2')
+      await pdf.screenshot({ path: screenshotPath('pdf-view-switch-footer') })
+
+      // Read mode hides the footer; the host header carries the same switch
+      await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
+      const headerSwitch = page.locator('.tab-view-switch')
+      const headerPaged = headerSwitch.locator('[title="Page by page"]')
+      const headerContinuous = headerSwitch.locator('[title="Continuous"]')
+      await expect(headerSwitch).toBeVisible()
+      await expect(headerPaged).toHaveAttribute('aria-pressed', 'true')
+      await page.screenshot({ path: screenshotPath('pdf-view-switch-read-mode') })
+      await headerContinuous.click()
+      await expect(headerContinuous).toHaveAttribute('aria-pressed', 'true')
+      await expect(pdf.locator('.pdf-page')).toHaveCount(3)
+      await headerPaged.click()
+      await expect(headerPaged).toHaveAttribute('aria-pressed', 'true')
+      await expect(pdf.locator('.pdf-page:visible')).toHaveAttribute('data-orig-idx', '2')
+
+      // Another PDF tab is not in Read mode, so the strip shows no switch for it...
+      await page.evaluate((file) => window.reader.openPath(file), second)
+      await expect(page.locator('.tab-item', { hasText: 'second.pdf' })).toBeVisible()
+      await expect(headerSwitch).toHaveCount(0)
+      // ...and returning to the reading tab restores its own state
+      await page.locator('.tab-item', { hasText: 'document.pdf' }).click()
+      await expect(headerSwitch).toBeVisible()
+      await expect(headerPaged).toHaveAttribute('aria-pressed', 'true')
+
+      // Leaving Read mode returns the footer and ribbon, still page-by-page
+      await page.locator('.tab-exit-read').click()
+      await expect(page.locator('.tab-exit-read')).toHaveCount(0)
+      await expect(pdf.locator('.status-view-switch [title="Page by page"]')).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      )
+      await expect(paged).toHaveAttribute('aria-pressed', 'true')
+    } finally {
+      await closeReader(launched)
+    }
+    expect(crashes).toEqual([])
+  })
+})
+
 /** A throwaway PDF with the requested page count; `text` goes on page one as real page text. */
 async function writeTestPdf(path: string, pages: number, text?: string): Promise<void> {
   const document = await PDFDocument.create()

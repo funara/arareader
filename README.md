@@ -47,7 +47,7 @@ updater point there.
 ### Reading
 
 - PDF.js rendering with a selectable text layer, thumbnails, outline/bookmarks, and link handling.
-- Search with match navigation; zoom, fit width, fit page; continuous scrolling and a one- or two-page spread; keyboard page navigation.
+- Search with match navigation; zoom, fit width, fit page; continuous scrolling or a page-by-page view with a one- or two-page spread; keyboard page navigation.
 - **Command Center:** Find commands or search document text in one place with `Ctrl+K` (`Cmd+K` on macOS). Its launcher cycles through search hints.
 - **Read mode:** Hide the ribbon, footer, and panels for focused reading. Select **Read** on Home or View, then use **Exit Read mode** or `Esc` to restore the previous mode and panel layout; unfinished text edits are preserved. Read mode is an interface setting, not a permanent PDF lock.
 - Sidebar with thumbnails, outline, and comments; resizable and remembered widths. The Pages and ARA Assistant panels can be collapsed independently.
@@ -156,11 +156,11 @@ Network communication is strictly gated and limited to explicit, user-initiated 
 
 | Platform | Target         | Configuration                                                                                             |
 | -------- | -------------- | --------------------------------------------------------------------------------------------------------- |
-| Windows  | NSIS (x64)     | Expected installer: `apps/desktop/release/ARAReader.Setup.0.2.0.exe` (per-user, with `.pdf` association). |
+| Windows  | NSIS (x64)     | Expected installer: `apps/desktop/release/ARAReader.Setup.0.2.1.exe` (per-user, with `.pdf` association). |
 | macOS    | DMG + ZIP      | Configured in `apps/desktop/electron-builder.cjs`; must be built on macOS.                                |
 | Linux    | AppImage + deb | Configured in `apps/desktop/electron-builder.cjs`; must be built on Linux.                                |
 
-Version 0.2.0 installers were not built as part of this preparation. Release
+Version 0.2.1 installers were not built as part of this preparation. Release
 artifacts are intended for [GitHub Releases](https://github.com/funara/arareader/releases);
 the packaged app reads that repository from `resources/app-update.yml`. See
 [docs/RELEASE.md](docs/RELEASE.md) for the release checklist.
@@ -298,7 +298,7 @@ arareader/
 
 ---
 
-## Known limitations (v0.2.0)
+## Known limitations (v0.2.1)
 
 - macOS and Linux installers are configured but have not been built here; they
   must be produced on their own hosts.

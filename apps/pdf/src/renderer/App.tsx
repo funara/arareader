@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, ReactElement, ReactNode, RefObject } from 'react'
+import type { CSSProperties, ReactElement, ReactNode } from 'react'
 // legacy build: the modern build relies on new APIs like Math.sumPrecise that the current
 // Electron V8 lacks, making embedded font parsing fail and whole pages render as garbled raw char codes
 import { GlobalWorkerOptions, TextLayer, getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
@@ -25,7 +25,8 @@ import { compileContentEdits, displayBoxToPdf, imageFileToPng } from './content-
 import type { PageContentEdit } from './content-edit'
 import { FormLayer } from './FormLayer'
 import { navAction } from './keyNav'
-import { rowOfVisIdx, rowTopOffsets, spreadRows, stepPage } from './spread'
+import { pageRow, rowOfVisIdx, rowTopOffsets, spreadRows, stepPage } from './spread'
+import { wheelPageTurn } from './wheel-paging'
 import { hasUnsavedEdits } from './dirty'
 import { LinkLayer } from './LinkLayer'
 import { OutlinePanel } from './OutlinePanel'
@@ -33,6 +34,7 @@ import { CommentsPanel } from './CommentsPanel'
 import { CommandPalette } from './CommandPalette'
 import type { PaletteCommand } from './CommandPalette'
 import { OrganizeGrid } from './OrganizeGrid'
+import { useVisibleSet } from './useVisibleSet'
 import { annotationsToRows, type CommentRow } from './comments'
 import type { OutlineEditOp, OutlineNode } from './OutlinePanel'
 import { PdfPrintPreview } from './PdfPrintPreview'
@@ -114,44 +116,6 @@ const DOC_OPTS = {
   cMapPacked: true,
   standardFontDataUrl: `${ASSET_BASE}standard_fonts/`,
   wasmUrl: `${ASSET_BASE}wasm/`,
-}
-
-/** Which items in the container are within the (expanded) viewport — shared lazy-render basis
-    for pages/thumbnails. Rebuild the observer when enabled flips (sidebar toggles unmount/remount the root) */
-function useVisibleSet(
-  rootRef: RefObject<HTMLElement | null>,
-  count: number,
-  rootMargin: string,
-  enabled = true,
-): { visible: Set<number>; setItemRef: (idx: number) => (el: HTMLElement | null) => void } {
-  const [visible, setVisible] = useState<Set<number>>(new Set())
-  const itemRefs = useRef<(HTMLElement | null)[]>([])
-  useEffect(() => {
-    const root = rootRef.current
-    if (!enabled || !root || count === 0) return
-    const io = new IntersectionObserver(
-      (entries) => {
-        setVisible((prev) => {
-          const next = new Set(prev)
-          for (const e of entries) {
-            const idx = Number((e.target as HTMLElement).dataset.idx)
-            if (e.isIntersecting) next.add(idx)
-            else next.delete(idx)
-          }
-          return next
-        })
-      },
-      { root, rootMargin },
-    )
-    for (const el of itemRefs.current) if (el) io.observe(el)
-    return () => io.disconnect()
-  }, [rootRef, count, rootMargin, enabled])
-  return {
-    visible,
-    setItemRef: (idx) => (el) => {
-      itemRefs.current[idx] = el
-    },
-  }
 }
 
 /** Single page: renders canvas + text layer (select/copy) when visible, released once off-viewport */
@@ -499,6 +463,19 @@ const IconRead = () => (
 const IconSinglePage = () => (
   <Icon>
     <rect x="6.81" y="4.5" width="10.38" height="15" rx="1.15" />
+  </Icon>
+)
+const IconContinuous = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <rect x="5.5" y="3.5" width="13" height="4.5" rx="1" />
+    <rect x="5.5" y="9.75" width="13" height="4.5" rx="1" />
+    <rect x="5.5" y="16" width="13" height="4.5" rx="1" />
+  </Icon>
+)
+const IconPaged = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <rect x="8" y="4.5" width="8" height="15" rx="1" />
+    <path d="M4.5 7 H6.5 M4.5 12 H6.5 M4.5 17 H6.5" />
   </Icon>
 )
 const IconWatermark = () => (
@@ -1075,6 +1052,8 @@ export default function App() {
     localStorage.setItem('ai-pdf-open', aiCollapsed ? '0' : '1')
   }, [aiCollapsed])
   const [spread, setSpread] = useState<1 | 2>(1)
+  /** Paged mode shows one row (a page, or a spread) at a time; wheel/keys flip pages like slides */
+  const [viewMode, setViewMode] = useState<'continuous' | 'paged'>('continuous')
   const [outline, setOutline] = useState<OutlineNode[] | null>(null)
   const [markups, setMarkups] = useState<LocalMarkup[]>([])
   const [drawings, setDrawings] = useState<LocalDrawing[]>([])
@@ -1329,6 +1308,8 @@ export default function App() {
   const passwordRef = useRef<string | undefined>(undefined)
   const fitModeRef = useRef<FitMode>('width')
   const scrollRef = useRef<HTMLDivElement>(null)
+  /** Paged mode wheel gesture: accumulate one burst, flip once, reset on idle or reversal */
+  const wheelGestureRef = useRef({ lastAt: 0, acc: 0, locked: false })
   const thumbsRef = useRef<HTMLDivElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const searchIndexRef = useRef<{ doc: PDFDocumentProxy; promise: Promise<SearchIndex> } | null>(
@@ -1373,6 +1354,29 @@ export default function App() {
     scrollRef,
     rows.length,
     '800px 0px',
+  )
+  // Deleting pages (or opening a shorter document) can leave the page pointer out of range
+  useEffect(() => {
+    setCurrentPage((p) => Math.max(1, Math.min(p, pageCount)))
+  }, [pageCount])
+  const currentRow = pageRow(currentPage, pageCount, spread)
+  /** In-progress content edits stay mounted in paged mode, or turning the page discards them */
+  const draftRows = useMemo(
+    () =>
+      [...new Set([...draftPages].map((origIdx) => rowOfVis(visList.indexOf(origIdx))))].filter(
+        (r) => r >= 0,
+      ),
+    [draftPages, visList, rowOfVis],
+  )
+  /** Rows in the DOM: paged mode mounts the current row plus any page with a live draft */
+  const mountedRows = useMemo(
+    () => (viewMode === 'paged' ? [...new Set([currentRow, ...draftRows])] : rows.map((_, i) => i)),
+    [viewMode, currentRow, draftRows, rows],
+  )
+  /** Rows whose content may render: in paged mode only the current row is on screen */
+  const visibleRowSet = useMemo(
+    () => (viewMode === 'paged' ? new Set([currentRow]) : visibleRows),
+    [viewMode, currentRow, visibleRows],
   )
   const { visible: visibleThumbs, setItemRef: setThumbRef } = useVisibleSet(
     thumbsRef,
@@ -1458,7 +1462,11 @@ export default function App() {
         // A newly opened file starts outside the autosave gate
         savedOnceRef.current = false
         await loadDoc(path, null)
+        setCurrentPage(1)
         setStatus('ready')
+        requestAnimationFrame(() => {
+          if (scrollRef.current) scrollRef.current.scrollTop = 0
+        })
       } catch (err) {
         if ((err as Error | null)?.name === 'PasswordException') {
           setPwWrong(passwordRef.current !== undefined)
@@ -1530,7 +1538,11 @@ export default function App() {
     const mode = fitModeRef.current
     const el = scrollRef.current
     if (!mode || !el || rows.length === 0) return
-    const dims = rows.map((r) => rowSize(r))
+    // Paged mode fits the current page only, so a mixed-size document doesn't shrink every page
+    const dims =
+      viewMode === 'paged'
+        ? [rowSize(rows[pageRow(currentPage, pageCount, spread)] ?? rows[0]!)]
+        : rows.map(rowSize)
     const maxW = Math.max(...dims.map((s) => s.width))
     const availW = el.clientWidth - SCROLL_PAD * 2
     if (mode === 'width') {
@@ -1539,7 +1551,7 @@ export default function App() {
       const maxH = Math.max(...dims.map((s) => s.height))
       setScale(clampScale(Math.min(availW / maxW, (el.clientHeight - PAGE_GAP * 2) / maxH)))
     }
-  }, [rows, rowSize])
+  }, [rows, rowSize, viewMode, currentPage, pageCount, spread])
 
   useEffect(() => {
     if (status !== 'ready') return
@@ -1567,7 +1579,7 @@ export default function App() {
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
-    if (!el || rows.length === 0) return
+    if (!el || rows.length === 0 || viewMode === 'paged') return
     const anchor = el.scrollTop + el.clientHeight * 0.4
     let rowIdx = 0
     for (let i = 0; i < rows.length; i++) {
@@ -1576,12 +1588,17 @@ export default function App() {
     }
     const page = visList.indexOf(rows[rowIdx]![0]!) + 1
     setCurrentPage(page)
-  }, [rows, rowTop, visList])
+  }, [rows, rowTop, visList, viewMode])
 
   const scrollToPage = (n: number) => {
-    const el = scrollRef.current
-    if (!el) return
     const target = Math.min(Math.max(1, n), pageCount)
+    const el = scrollRef.current
+    if (viewMode === 'paged') {
+      setCurrentPage(target)
+      if (el) el.scrollTop = 0
+      return
+    }
+    if (!el) return
     el.scrollTop = rowTop(rowOfVis(target - 1)) - PAGE_GAP / 2
   }
 
@@ -1602,6 +1619,30 @@ export default function App() {
   const zoomIn = () => applyScale(ZOOM_STEPS.find((s) => s > scale + 0.001) ?? MAX_SCALE, null)
   const zoomOut = () =>
     applyScale([...ZOOM_STEPS].reverse().find((s) => s < scale - 0.001) ?? MIN_SCALE, null)
+
+  /** Switch the scrolling model: paged fits a page to the window; continuous keeps that zoom. */
+  const switchViewMode = (mode: 'continuous' | 'paged') => {
+    if (mode === viewMode) return
+    setViewMode(mode)
+    if (mode === 'paged') {
+      fitModeRef.current = 'page'
+      return
+    }
+    // Back to scrolling: restore the position around the page that was on screen
+    fitModeRef.current = null
+    requestAnimationFrame(() => {
+      const el = scrollRef.current
+      if (el) el.scrollTop = rowTop(pageRow(currentPage, pageCount, spread)) - PAGE_GAP / 2
+    })
+  }
+
+  // The host tab strip mirrors paged/continuous state; both switches read the same value
+  useEffect(() => {
+    window.pdfApi.setViewModeState(viewMode === 'paged')
+  }, [viewMode])
+  useEffect(() =>
+    window.pdfApi.onSetViewMode((paged) => switchViewMode(paged ? 'paged' : 'continuous')),
+  )
 
   const dirty = hasUnsavedEdits({
     markups,
@@ -1719,10 +1760,15 @@ export default function App() {
       if (!m || !el) return
       const visIdx = visList.indexOf(m.pageIndex)
       if (visIdx < 0) return
+      if (viewMode === 'paged') {
+        setCurrentPage(visIdx + 1)
+        el.scrollTop = 0
+        return
+      }
       const box = pdfRectToCss(pageGeom(m.pageIndex), m.rects[0] ?? [0, 0, 0, 0], scale)
       el.scrollTop = Math.max(0, pageTop(visIdx) + box.top - el.clientHeight * 0.35)
     },
-    [activeMatches, visList, pageGeom, scale, pageTop],
+    [activeMatches, visList, pageGeom, scale, pageTop, viewMode],
   )
 
   // Scroll to the current match on new results or position changes (unrelated changes like zoom don't re-scroll)
@@ -1778,6 +1824,7 @@ export default function App() {
       el,
       visList.map((i) => pageGeom(i)),
       scale,
+      visList,
     )
     setSelPopup(null)
     if (!byVisPage) return
@@ -2123,7 +2170,7 @@ export default function App() {
   /** Stamp preview for visible pages (only pages in rendered rows, so large docs don't render every canvas) */
   const stampPreview = useMemo(() => {
     if (!stampCfg) return new Map<number, StampInput[]>()
-    const shown = new Set([...visibleRows].flatMap((r) => rows[r] ?? []))
+    const shown = new Set([...visibleRowSet].flatMap((r) => rows[r] ?? []))
     const byPage = new Map<number, StampInput[]>()
     for (const s of renderStamps(stampCfg, visList)) {
       if (!shown.has(s.pageIndex)) continue
@@ -2132,7 +2179,7 @@ export default function App() {
       else byPage.set(s.pageIndex, [s])
     }
     return byPage
-  }, [stampCfg, visList, rows, visibleRows, renderStamps])
+  }, [stampCfg, visList, rows, visibleRowSet, renderStamps])
 
   /** Thumbnail drag-and-drop reorder: move the page at position from to position to */
   const movePage = (from: number, to: number) => {
@@ -3035,13 +3082,17 @@ export default function App() {
       e.preventDefault()
       switch (action.type) {
         case 'scrollViewport':
-          el.scrollTop += action.dir * (el.clientHeight - 40)
+          if (viewMode === 'paged') scrollToPage(stepPage(visList, spread, currentPage, action.dir))
+          else el.scrollTop += action.dir * (el.clientHeight - 40)
           break
         case 'scrollEdge':
-          el.scrollTop = action.edge === 'top' ? 0 : el.scrollHeight
+          if (viewMode === 'paged') scrollToPage(action.edge === 'top' ? 1 : pageCount)
+          else el.scrollTop = action.edge === 'top' ? 0 : el.scrollHeight
           break
         case 'scrollBy':
-          el.scrollTop += action.delta
+          if (viewMode === 'paged')
+            scrollToPage(stepPage(visList, spread, currentPage, action.delta > 0 ? 1 : -1))
+          else el.scrollTop += action.delta
           break
         case 'stepPage': {
           const target = stepPage(visList, spread, currentPage, action.dir)
@@ -3061,15 +3112,29 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   })
 
-  // Ctrl/⌘ + wheel zoom (native listener: React's wheel is passive and can't preventDefault)
+  // Ctrl/⌘ + wheel zoom; plain wheel flips whole pages in paged mode (native listener:
+  // React's wheel is passive and can't preventDefault)
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
     const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey && !e.metaKey) return
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault()
+        if (e.deltaY < 0) zoomIn()
+        else zoomOut()
+        return
+      }
+      if (viewMode !== 'paged' || e.deltaY === 0) return
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return
+      const dir = e.deltaY > 0 ? 1 : -1
+      // A zoomed-in page pans first; only at its edge does the wheel turn the page
+      const canScroll = el.scrollHeight > el.clientHeight + 1
+      const atEdge =
+        dir > 0 ? el.scrollTop + el.clientHeight >= el.scrollHeight - 1 : el.scrollTop <= 0
+      if (canScroll && !atEdge) return
       e.preventDefault()
-      if (e.deltaY < 0) zoomIn()
-      else zoomOut()
+      const turn = wheelPageTurn(wheelGestureRef.current, e, performance.now(), el.clientHeight)
+      if (turn) scrollToPage(stepPage(visList, spread, currentPage, turn))
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
@@ -3236,6 +3301,12 @@ export default function App() {
     },
     { id: 'zoom-in', label: t('zoomIn'), run: zoomIn },
     { id: 'zoom-out', label: t('zoomOut'), run: zoomOut },
+    {
+      id: 'view-continuous',
+      label: t('continuousView'),
+      run: () => switchViewMode('continuous'),
+    },
+    { id: 'view-paged', label: t('pagedView'), run: () => switchViewMode('paged') },
     { id: 'spread-one', label: t('singlePage'), run: () => setSpread(1) },
     { id: 'spread-two', label: t('twoPage'), run: () => setSpread(2) },
     {
@@ -4324,6 +4395,28 @@ export default function App() {
               <div className="ribbon-group">
                 <div className="ribbon-group-items">
                   <button
+                    className={`rb-big${viewMode === 'continuous' ? ' active' : ''}`}
+                    title={t('continuousView')}
+                    aria-pressed={viewMode === 'continuous'}
+                    onClick={() => switchViewMode('continuous')}
+                  >
+                    <span className="rb-big-icon">
+                      <IconContinuous />
+                    </span>
+                    {t('continuousView')}
+                  </button>
+                  <button
+                    className={`rb-big${viewMode === 'paged' ? ' active' : ''}`}
+                    title={t('pagedView')}
+                    aria-pressed={viewMode === 'paged'}
+                    onClick={() => switchViewMode('paged')}
+                  >
+                    <span className="rb-big-icon">
+                      <IconPaged />
+                    </span>
+                    {t('pagedView')}
+                  </button>
+                  <button
                     className={`rb-big${spread === 1 ? ' active' : ''}`}
                     title={t('singlePage')}
                     onClick={() => setSpread(1)}
@@ -4835,7 +4928,7 @@ export default function App() {
             </button>
             <div
               ref={scrollRef}
-              className={`pdf-scroll${drawTool ? ' pdf-drawing' : ''}${canEditAnnotations ? ' pdf-editing' : ''}`}
+              className={`pdf-scroll${viewMode === 'paged' ? ' pdf-paged' : ''}${drawTool ? ' pdf-drawing' : ''}${canEditAnnotations ? ' pdf-editing' : ''}`}
               onScroll={() => {
                 handleScroll()
                 setSelPopup(null)
@@ -4852,164 +4945,172 @@ export default function App() {
                   setSelected(null)
               }}
             >
-              {rows.map((row, r) => (
-                <div key={r} ref={setRowRef(r)} data-idx={r} className="pdf-row">
-                  {row.map((origIdx) => {
-                    const rowVisible = visibleRows.has(r)
-                    const size = dispSize(origIdx)
-                    const geom = pageGeom(origIdx)
-                    return (
-                      <div
-                        key={origIdx}
-                        className="pdf-page"
-                        data-orig-idx={origIdx}
-                        style={
-                          {
-                            width: Math.floor(size.width * scale),
-                            height: Math.floor(size.height * scale),
-                            '--scale-factor': scale,
-                          } as CSSProperties
-                        }
-                      >
-                        <PdfPage
-                          doc={doc}
-                          pageNo={origIdx + 1}
-                          scale={scale}
-                          rotationDelta={rotDelta(origIdx)}
-                          visible={rowVisible}
-                        />
-                        {pendingSign && (
-                          <SignDropOverlay
-                            sig={pendingSign}
-                            dispW={geomDispSize(geom).width}
-                            dispH={geomDispSize(geom).height}
-                            scale={scale}
-                            color={drawColor}
-                            title={t('signHint')}
-                            onPlace={(vx, vy) => placeSignature(origIdx, vx, vy)}
-                          />
-                        )}
-                        {rowVisible && (
-                          <>
-                            {/* Preview of unsaved stamps; clicking selects the whole watermark/header-footer set */}
-                            {(stampPreview.get(origIdx) ?? []).map((s, si) => (
-                              <img
-                                key={si}
-                                className={`pdf-stamp-preview${selected?.kind === 'stamp' ? ' pdf-stamp-selected' : ''}`}
-                                src={`data:image/png;base64,${s.image}`}
-                                alt=""
-                                title={t('removeStamp')}
-                                style={{
-                                  ...pdfRectToCss(geom, s.rect, scale),
-                                  opacity: s.opacity ?? 1,
-                                }}
-                                onClick={(e) => {
-                                  if (canEditAnnotations)
-                                    setSelected({
-                                      kind: 'stamp',
-                                      ...popupPos(e.clientX, e.clientY),
-                                    })
-                                }}
-                              />
-                            ))}
-                            {searchOpen && (
-                              <div className="pdf-search-layer">
-                                {activeMatches.flatMap((m, mi) =>
-                                  m.pageIndex === origIdx
-                                    ? m.rects.map((r, ri) => (
-                                        <div
-                                          key={`${mi}-${ri}`}
-                                          className={`pdf-search-hit${mi === searchCurClamped ? ' pdf-search-hit-cur' : ''}`}
-                                          style={pdfRectToCss(geom, r, scale)}
-                                        />
-                                      ))
-                                    : [],
-                                )}
-                              </div>
-                            )}
-                            <MarkupOverlay
-                              markups={markups.filter((m) => m.pageIndex === origIdx)}
-                              geom={geom}
-                              scale={scale}
-                              selectedId={selected?.kind === 'markup' ? selected.id : null}
-                              selectTitle={t('removeMarkup')}
-                              onSelect={(id, x, y) => {
-                                if (canEditAnnotations)
-                                  setSelected({ kind: 'markup', id, ...popupPos(x, y) })
-                              }}
-                            />
-                            <DrawLayer
-                              key={editMode ? 'edit' : 'select'}
-                              geom={geom}
-                              scale={scale}
-                              pageWidth={size.width}
-                              pageHeight={size.height}
-                              drawings={drawings.filter((d) => d.input.pageIndex === origIdx)}
-                              tool={readOnly || editMode ? null : drawTool}
-                              color={drawColor}
-                              strokeWidth={STROKE_WIDTH}
-                              selectedId={selected?.kind === 'drawing' ? selected.id : null}
-                              selectTitle={t('removeMarkup')}
-                              interactive={canEditAnnotations}
-                              onCommit={(input) => commitDrawing(origIdx, input)}
-                              onPlaceAt={(kind, at) => {
-                                setNoteText('')
-                                setNotePrompt({ kind, origIdx, at })
-                              }}
-                              onSelect={(id, x, y) => {
-                                if (canEditAnnotations)
-                                  setSelected({ kind: 'drawing', id, ...popupPos(x, y) })
-                              }}
-                              onMove={canEditAnnotations ? moveDrawing : undefined}
-                              onResize={canEditAnnotations ? resizeDrawing : undefined}
-                              onEdit={(id) => {
-                                const d = drawings.find((x) => x.id === id)
-                                if (d?.input.kind === 'freetext') openFreetextEditor(d)
-                              }}
-                            />
-                          </>
-                        )}
-                        {(rowVisible || draftPages.has(origIdx)) && (
-                          <EditPdfLayer
+              {mountedRows.map((r) => {
+                const row = rows[r] ?? []
+                const rowVisible = visibleRowSet.has(r)
+                return (
+                  <div
+                    key={r}
+                    ref={setRowRef(r)}
+                    data-idx={r}
+                    className={`pdf-row${viewMode === 'paged' && r !== currentRow ? ' pdf-row-offscreen' : ''}`}
+                  >
+                    {row.map((origIdx) => {
+                      const size = dispSize(origIdx)
+                      const geom = pageGeom(origIdx)
+                      return (
+                        <div
+                          key={origIdx}
+                          className="pdf-page"
+                          data-orig-idx={origIdx}
+                          style={
+                            {
+                              width: Math.floor(size.width * scale),
+                              height: Math.floor(size.height * scale),
+                              '--scale-factor': scale,
+                            } as CSSProperties
+                          }
+                        >
+                          <PdfPage
                             doc={doc}
                             pageNo={origIdx + 1}
-                            geom={geom}
                             scale={scale}
-                            editMode={editMode}
-                            edits={pageEdits.filter((e) => e.pageIndex === origIdx)}
-                            readOnly={readOnly || readMode}
-                            onCommit={commitContentEdit}
-                            onDraftActivity={onDraftActivity}
+                            rotationDelta={rotDelta(origIdx)}
+                            visible={rowVisible}
                           />
-                        )}
-                        {rowVisible && (
-                          <>
-                            <LinkLayer
-                              doc={doc}
-                              pageNo={origIdx + 1}
-                              geom={geom}
+                          {pendingSign && (
+                            <SignDropOverlay
+                              sig={pendingSign}
+                              dispW={geomDispSize(geom).width}
+                              dispH={geomDispSize(geom).height}
                               scale={scale}
-                              onGoToDest={(dest) => void goToDest(dest)}
+                              color={drawColor}
+                              title={t('signHint')}
+                              onPlace={(vx, vy) => placeSignature(origIdx, vx, vy)}
                             />
-                            <FormLayer
+                          )}
+                          {rowVisible && (
+                            <>
+                              {/* Preview of unsaved stamps; clicking selects the whole watermark/header-footer set */}
+                              {(stampPreview.get(origIdx) ?? []).map((s, si) => (
+                                <img
+                                  key={si}
+                                  className={`pdf-stamp-preview${selected?.kind === 'stamp' ? ' pdf-stamp-selected' : ''}`}
+                                  src={`data:image/png;base64,${s.image}`}
+                                  alt=""
+                                  title={t('removeStamp')}
+                                  style={{
+                                    ...pdfRectToCss(geom, s.rect, scale),
+                                    opacity: s.opacity ?? 1,
+                                  }}
+                                  onClick={(e) => {
+                                    if (canEditAnnotations)
+                                      setSelected({
+                                        kind: 'stamp',
+                                        ...popupPos(e.clientX, e.clientY),
+                                      })
+                                  }}
+                                />
+                              ))}
+                              {searchOpen && (
+                                <div className="pdf-search-layer">
+                                  {activeMatches.flatMap((m, mi) =>
+                                    m.pageIndex === origIdx
+                                      ? m.rects.map((r, ri) => (
+                                          <div
+                                            key={`${mi}-${ri}`}
+                                            className={`pdf-search-hit${mi === searchCurClamped ? ' pdf-search-hit-cur' : ''}`}
+                                            style={pdfRectToCss(geom, r, scale)}
+                                          />
+                                        ))
+                                      : [],
+                                  )}
+                                </div>
+                              )}
+                              <MarkupOverlay
+                                markups={markups.filter((m) => m.pageIndex === origIdx)}
+                                geom={geom}
+                                scale={scale}
+                                selectedId={selected?.kind === 'markup' ? selected.id : null}
+                                selectTitle={t('removeMarkup')}
+                                onSelect={(id, x, y) => {
+                                  if (canEditAnnotations)
+                                    setSelected({ kind: 'markup', id, ...popupPos(x, y) })
+                                }}
+                              />
+                              <DrawLayer
+                                key={editMode ? 'edit' : 'select'}
+                                geom={geom}
+                                scale={scale}
+                                pageWidth={size.width}
+                                pageHeight={size.height}
+                                drawings={drawings.filter((d) => d.input.pageIndex === origIdx)}
+                                tool={readOnly || editMode ? null : drawTool}
+                                color={drawColor}
+                                strokeWidth={STROKE_WIDTH}
+                                selectedId={selected?.kind === 'drawing' ? selected.id : null}
+                                selectTitle={t('removeMarkup')}
+                                interactive={canEditAnnotations}
+                                onCommit={(input) => commitDrawing(origIdx, input)}
+                                onPlaceAt={(kind, at) => {
+                                  setNoteText('')
+                                  setNotePrompt({ kind, origIdx, at })
+                                }}
+                                onSelect={(id, x, y) => {
+                                  if (canEditAnnotations)
+                                    setSelected({ kind: 'drawing', id, ...popupPos(x, y) })
+                                }}
+                                onMove={canEditAnnotations ? moveDrawing : undefined}
+                                onResize={canEditAnnotations ? resizeDrawing : undefined}
+                                onEdit={(id) => {
+                                  const d = drawings.find((x) => x.id === id)
+                                  if (d?.input.kind === 'freetext') openFreetextEditor(d)
+                                }}
+                              />
+                            </>
+                          )}
+                          {(rowVisible || draftPages.has(origIdx)) && (
+                            <EditPdfLayer
                               doc={doc}
                               pageNo={origIdx + 1}
                               geom={geom}
                               scale={scale}
+                              editMode={editMode}
+                              edits={pageEdits.filter((e) => e.pageIndex === origIdx)}
                               readOnly={readOnly || readMode}
-                              edits={formEdits}
-                              onEdit={(v2) => {
-                                pushUndo(`form:${v2.name}`)
-                                setFormEdits((prev) => new Map(prev).set(v2.name, v2))
-                              }}
+                              onCommit={commitContentEdit}
+                              onDraftActivity={onDraftActivity}
                             />
-                          </>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
-              ))}
+                          )}
+                          {rowVisible && (
+                            <>
+                              <LinkLayer
+                                doc={doc}
+                                pageNo={origIdx + 1}
+                                geom={geom}
+                                scale={scale}
+                                onGoToDest={(dest) => void goToDest(dest)}
+                              />
+                              <FormLayer
+                                doc={doc}
+                                pageNo={origIdx + 1}
+                                geom={geom}
+                                scale={scale}
+                                readOnly={readOnly || readMode}
+                                edits={formEdits}
+                                onEdit={(v2) => {
+                                  pushUndo(`form:${v2.name}`)
+                                  setFormEdits((prev) => new Map(prev).set(v2.name, v2))
+                                }}
+                              />
+                            </>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )
+              })}
             </div>
             {searchOpen && (
               <div className="pdf-search-bar">
@@ -5573,6 +5674,28 @@ export default function App() {
             +
           </button>
           <span className="zoom-value">{Math.round(scale * 100)}%</span>
+        </div>
+        <div className="status-view-switch" role="group" aria-label={t('viewMode')}>
+          <button
+            type="button"
+            className={`status-view-btn${viewMode === 'continuous' ? ' active' : ''}`}
+            title={t('continuousView')}
+            aria-label={t('continuousView')}
+            aria-pressed={viewMode === 'continuous'}
+            onClick={() => switchViewMode('continuous')}
+          >
+            <IconContinuous size={14} />
+          </button>
+          <button
+            type="button"
+            className={`status-view-btn${viewMode === 'paged' ? ' active' : ''}`}
+            title={t('pagedView')}
+            aria-label={t('pagedView')}
+            aria-pressed={viewMode === 'paged'}
+            onClick={() => switchViewMode('paged')}
+          >
+            <IconPaged size={14} />
+          </button>
         </div>
         <div className="status-file">
           <span className="ribbon-file" title={filePath}>
