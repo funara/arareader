@@ -5,6 +5,19 @@ All notable changes to **ARAReader** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.2.2]
+
+### Added
+
+- **Page layout controls:** Switch between single-page and two-page layouts from the footer or Read-mode header.
+- **Assistant history:** Open a recent PDF with a fresh conversation while keeping earlier messages available in History.
+
+### Changed
+
+- **Assistant reliability:** Preserve conversation boundaries and report stopped or failed actions accurately.
+- **Text editing:** Clicking outside the active text editor cancels its unapplied draft; applied edits remain.
+- **Navigation sidebar:** Show the narrow sidebar rail only when the pane is collapsed.
+
 ## [v0.2.1]
 
 ### Added
