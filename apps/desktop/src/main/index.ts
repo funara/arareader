@@ -575,12 +575,20 @@ function registerTabsIpc(): void {
   ipcMain.on(PDF_CHANNELS.viewModeChanged, (event, paged: unknown) => {
     if (typeof paged === 'boolean') tabManager?.setPagedFor(event.sender.id, paged)
   })
+  ipcMain.on(PDF_CHANNELS.spreadChanged, (event, spread: unknown) => {
+    if (spread === 1 || spread === 2) tabManager?.setSpreadFor(event.sender.id, spread)
+  })
   ipcMain.handle(TABS_CHANNELS.exitReadMode, (event: IpcMainInvokeEvent) => {
     if (event.sender === mainWindow?.webContents) tabManager?.exitActiveReadMode()
   })
   ipcMain.handle(TABS_CHANNELS.setViewMode, (event: IpcMainInvokeEvent, paged: unknown) => {
     if (event.sender === mainWindow?.webContents && typeof paged === 'boolean') {
       tabManager?.setActiveViewMode(paged)
+    }
+  })
+  ipcMain.handle(TABS_CHANNELS.setSpread, (event: IpcMainInvokeEvent, spread: unknown) => {
+    if (event.sender === mainWindow?.webContents && (spread === 1 || spread === 2)) {
+      tabManager?.setActiveSpread(spread)
     }
   })
   ipcMain.handle(TABS_CHANNELS.list, () => tabManager?.list() ?? [])

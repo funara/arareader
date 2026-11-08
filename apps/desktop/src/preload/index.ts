@@ -165,6 +165,9 @@ const tabsApi: TabsApi = {
   async setViewMode(paged) {
     await ipcRenderer.invoke(TABS_CHANNELS.setViewMode, paged)
   },
+  async setSpread(spread) {
+    await ipcRenderer.invoke(TABS_CHANNELS.setSpread, spread)
+  },
   onChanged(handler) {
     const listener = (_event: IpcRendererEvent, tabs: TabSummary[]) => handler(tabs)
     ipcRenderer.on(TABS_CHANNELS.changed, listener)

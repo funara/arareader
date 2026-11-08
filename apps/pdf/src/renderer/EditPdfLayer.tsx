@@ -169,6 +169,8 @@ export function EditPdfLayer({
 }): ReactElement {
   const rootRef = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  const editorRef = useRef<HTMLTextAreaElement>(null)
+  const toolbarRef = useRef<HTMLDivElement>(null)
 
   /** Discovered lines and painted images of the page; filled only while editing */
   const [blocks, setBlocks] = useState<EditableTextBlock[]>([])
@@ -195,6 +197,17 @@ export function EditPdfLayer({
 
   const [draft, setDraft] = useState<Draft | null>(null)
   const hasDraft = draft !== null
+  useEffect(() => {
+    if (!hasDraft) return
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      if (editorRef.current?.contains(target) || toolbarRef.current?.contains(target)) return
+      setDraft(null)
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => document.removeEventListener('pointerdown', onPointerDown, true)
+  }, [hasDraft])
   useEffect(() => {
     onDraftActivity(pageNo - 1, hasDraft)
   }, [pageNo, hasDraft, onDraftActivity])
@@ -918,6 +931,7 @@ export function EditPdfLayer({
             />
           )}
           <textarea
+            ref={editorRef}
             className="pdf-content-editor-text"
             autoFocus
             value={draft.text}
@@ -954,7 +968,11 @@ export function EditPdfLayer({
               }
             }}
           />
-          <div className="pdf-content-toolbar" style={getFloatingStyle(geom, scale, draft.box)}>
+          <div
+            ref={toolbarRef}
+            className="pdf-content-toolbar"
+            style={getFloatingStyle(geom, scale, draft.box)}
+          >
             <button
               type="button"
               onClick={() => setDraft({ ...draft, fontSize: clampFont(draft.fontSize - 1) })}

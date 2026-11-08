@@ -65,6 +65,29 @@ function PagedGlyph() {
   )
 }
 
+function PageLayoutGlyph({ spread }: { spread: boolean }) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      aria-hidden="true"
+    >
+      {spread ? (
+        <>
+          <rect x="3" y="5" width="8" height="14" rx="1" />
+          <rect x="13" y="5" width="8" height="14" rx="1" />
+        </>
+      ) : (
+        <rect x="7" y="5" width="10" height="14" rx="1" />
+      )}
+    </svg>
+  )
+}
+
 const TAB_ICON: Record<TabSummary['kind'], ReactElement> = {
   home: <HomeIcon />,
   pdf: <PdfGlyph />,
@@ -359,6 +382,30 @@ export function TabBar({
               onClick={() => void window.readerTabs.setViewMode(true)}
             >
               <PagedGlyph />
+            </button>
+          </div>
+        )}
+        {activeTab?.kind === 'pdf' && activeTab.reading && (
+          <div className="tab-view-switch" role="group" aria-label={t('pageLayout')}>
+            <button
+              type="button"
+              className={`tab-view-btn${activeTab.spread !== 2 ? ' active' : ''}`}
+              title={t('singlePage')}
+              aria-label={t('singlePage')}
+              aria-pressed={activeTab.spread !== 2}
+              onClick={() => void window.readerTabs.setSpread(1)}
+            >
+              <PageLayoutGlyph spread={false} />
+            </button>
+            <button
+              type="button"
+              className={`tab-view-btn${activeTab.spread === 2 ? ' active' : ''}`}
+              title={t('twoPage')}
+              aria-label={t('twoPage')}
+              aria-pressed={activeTab.spread === 2}
+              onClick={() => void window.readerTabs.setSpread(2)}
+            >
+              <PageLayoutGlyph spread />
             </button>
           </div>
         )}

@@ -16,6 +16,7 @@ interface TabRecord {
   reading?: boolean
   /** renderer-reported view mode; absent until the PDF reports */
   paged?: boolean
+  spread?: 1 | 2
 }
 
 const HOME_ID = 'home'
@@ -111,6 +112,7 @@ export class TabManager {
       active: tab.id === this.activeId,
       reading: tab.reading ?? false,
       paged: tab.paged ?? false,
+      spread: tab.spread ?? 1,
     }))
   }
 
@@ -172,6 +174,20 @@ export class TabManager {
     const tab = this.activeTab()
     if (tab?.kind === 'pdf' && tab.reading && tab.view && !tab.view.webContents.isDestroyed()) {
       tab.view.webContents.send(PDF_CHANNELS.setViewMode, paged)
+    }
+  }
+
+  setSpreadFor(webContentsId: number, spread: 1 | 2): void {
+    const tab = this.tabs.find((item) => item.view?.webContents.id === webContentsId)
+    if (!tab || tab.spread === spread) return
+    tab.spread = spread
+    this.onChanged()
+  }
+
+  setActiveSpread(spread: 1 | 2): void {
+    const tab = this.activeTab()
+    if (tab?.kind === 'pdf' && tab.reading && tab.view && !tab.view.webContents.isDestroyed()) {
+      tab.view.webContents.send(PDF_CHANNELS.setSpread, spread)
     }
   }
 

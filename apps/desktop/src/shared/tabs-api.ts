@@ -13,6 +13,7 @@ export interface TabSummary {
   reading?: boolean
   /** active PDF's paged/continuous view mode; absent means continuous */
   paged?: boolean
+  spread?: 1 | 2
 }
 
 export interface TabsApi {
@@ -24,6 +25,7 @@ export interface TabsApi {
   exitReadMode(): Promise<void>
   /** ask the active Read-mode PDF to use this view mode; it reports back through the tab list */
   setViewMode(paged: boolean): Promise<void>
+  setSpread(spread: 1 | 2): Promise<void>
   /** subscribe to tab list changes (open/close/activate/title updates); returns unsubscribe */
   onChanged(handler: (tabs: TabSummary[]) => void): () => void
 }
@@ -35,5 +37,6 @@ export const TABS_CHANNELS = {
   reorder: 'tabs:reorder',
   exitReadMode: 'tabs:exit-read-mode',
   setViewMode: 'tabs:set-view-mode',
+  setSpread: 'tabs:set-spread',
   changed: 'tabs:changed',
 } as const

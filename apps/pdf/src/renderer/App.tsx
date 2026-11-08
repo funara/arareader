@@ -1643,6 +1643,10 @@ export default function App() {
   useEffect(() =>
     window.pdfApi.onSetViewMode((paged) => switchViewMode(paged ? 'paged' : 'continuous')),
   )
+  useEffect(() => {
+    window.pdfApi.setSpreadState(spread)
+  }, [spread])
+  useEffect(() => window.pdfApi.onSetSpread(setSpread), [])
 
   const dirty = hasUnsavedEdits({
     markups,
@@ -4925,15 +4929,17 @@ export default function App() {
             {(sidebar === 'thumbs' || (sidebar === 'outline' && !!outline)) && (
               <div className="pdf-side-resizer" onPointerDown={startSidebarResize} />
             )}
-            <button
-              className="pdf-sidebar-toggle"
-              aria-label={t('thumbs')}
-              aria-expanded={sidebar !== null}
-              title={t('thumbs')}
-              onClick={() => setSidebar((current) => (current ? null : 'thumbs'))}
-            >
-              <IconThumbs />
-            </button>
+            {sidebar === null && (
+              <button
+                className="pdf-sidebar-toggle"
+                aria-label={t('thumbs')}
+                aria-expanded={false}
+                title={t('thumbs')}
+                onClick={() => setSidebar('thumbs')}
+              >
+                <IconThumbs />
+              </button>
+            )}
             <div
               ref={scrollRef}
               className={`pdf-scroll${viewMode === 'paged' ? ' pdf-paged' : ''}${drawTool ? ' pdf-drawing' : ''}${canEditAnnotations ? ' pdf-editing' : ''}`}
@@ -5703,6 +5709,26 @@ export default function App() {
             onClick={() => switchViewMode('paged')}
           >
             <IconPaged size={14} />
+          </button>
+          <button
+            type="button"
+            className={`status-view-btn${spread === 1 ? ' active' : ''}`}
+            title={t('singlePage')}
+            aria-label={t('singlePage')}
+            aria-pressed={spread === 1}
+            onClick={() => setSpread(1)}
+          >
+            <IconSinglePage />
+          </button>
+          <button
+            type="button"
+            className={`status-view-btn${spread === 2 ? ' active' : ''}`}
+            title={t('twoPage')}
+            aria-label={t('twoPage')}
+            aria-pressed={spread === 2}
+            onClick={() => setSpread(2)}
+          >
+            <IconSpread />
           </button>
         </div>
         <div className="status-file">

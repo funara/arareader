@@ -54,6 +54,8 @@ export const PDF_CHANNELS = {
   exitReadMode: 'pdf:exit-read-mode',
   viewModeChanged: 'pdf:view-mode-changed',
   setViewMode: 'pdf:set-view-mode',
+  spreadChanged: 'pdf:spread-changed',
+  setSpread: 'pdf:set-spread',
   closeSaveRequest: 'pdf:close-save-request',
   closeSaveResult: 'pdf:close-save-result',
   getLanguage: 'app:get-language',
@@ -577,6 +579,8 @@ export interface PdfApi {
   setViewModeState(paged: boolean): void
   /** Host requests an explicit view mode (read-mode header switch) */
   onSetViewMode(handler: (paged: boolean) => void): () => void
+  setSpreadState(spread: 1 | 2): void
+  onSetSpread(handler: (spread: 1 | 2) => void): () => void
   /** Main process picked "Save" in the close prompt → renderer saves and replies via sendCloseSaveResult */
   onCloseSaveRequest(handler: () => void): () => void
   sendCloseSaveResult(ok: boolean): void

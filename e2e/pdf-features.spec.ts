@@ -57,6 +57,39 @@ async function fileDigest(path: string): Promise<string> {
  */
 
 test.describe('pdf features', () => {
+  test('shows the sidebar rail only when navigation panes are collapsed', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'arareader-sidebar-'))
+    const path = join(dir, 'document.pdf')
+    const document = await PDFDocument.create()
+    document.addPage([612, 792])
+    applyOutline(document, [{ title: 'Bookmark', pageIndex: 0 }])
+    await writeFile(path, await document.save())
+
+    const launched = await launchApp({ openFile: path })
+    try {
+      const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
+      const rail = pdf.locator('.pdf-sidebar-toggle')
+      const thumbnails = pdf.locator('.rb-big[title="Thumbnails"]').first()
+      await expect(pdf.locator('.pdf-thumb')).toHaveCount(1)
+      await expect(rail).toHaveCount(0)
+
+      await thumbnails.click()
+      await expect(pdf.locator('.pdf-thumbs')).toHaveCount(0)
+      await expect(rail).toHaveAttribute('aria-expanded', 'false')
+      await rail.click()
+      await expect(pdf.locator('.pdf-thumb')).toHaveCount(1)
+      await expect(rail).toHaveCount(0)
+
+      for (const name of ['Outline', 'Comments']) {
+        await pdf.locator(`.rb-big[title="${name}"]`).first().click()
+        await expect(pdf.locator('.pdf-outline-pane')).toBeVisible()
+        await expect(rail).toHaveCount(0)
+      }
+    } finally {
+      await closeReader(launched)
+    }
+  })
+
   test('outline editor round trip rewrites the file and re-renders the sidebar', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'arareader-pdf-'))
     const path = join(dir, 'document.pdf')
@@ -286,7 +319,8 @@ test('Read mode restores each PDF workspace and Command Center searches the docu
     await expect(host.locator('.tab-exit-read')).toBeVisible()
     await host.locator('.tab-exit-read').click()
     await expect(modes.locator('button[title="Select"]')).toHaveAttribute('aria-pressed', 'true')
-    await expect(pdf.locator('.pdf-sidebar-toggle')).toHaveAttribute('aria-expanded', 'true')
+    await expect(pdf.locator('.pdf-thumb').first()).toBeVisible()
+    await expect(pdf.locator('.pdf-sidebar-toggle')).toHaveCount(0)
     await expect(pdf.locator('.ai-dock')).not.toHaveClass(/collapsed/)
 
     await command.click()
@@ -308,7 +342,7 @@ test('Read mode restores each PDF workspace and Command Center searches the docu
     await pdf.locator('.ribbon-mode-group button[title="Edit PDF"]').click()
     await expect(pdf.locator('.pdf-content-block').first()).toBeVisible()
     const sidebar = pdf.locator('.pdf-sidebar-toggle')
-    await sidebar.click()
+    await pdf.locator('.rb-big[title="Thumbnails"]').first().click()
     await expect(sidebar).toHaveAttribute('aria-expanded', 'false')
     await expect(pdf.locator('.status-file .ribbon-file')).toHaveText('first.pdf')
     await pdf.locator('.ai-entry').first().click()
@@ -1046,6 +1080,48 @@ for (const kind of ['strokes', 'image'] as const) {
 }
 
 test.describe('direct content editing', () => {
+  test('outside click cancels a text draft without discarding applied edits', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'arareader-edit-cancel-'))
+    const path = join(dir, 'document.pdf')
+    await writeTestPdf(path, 1, 'Hello world')
+    const original = await fileDigest(path)
+    const launched = await launchApp({ openFile: path })
+    try {
+      const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
+      await pdf.locator('.rb-big[title="Edit PDF"]').click()
+      const block = pdf.locator('.pdf-content-block').first()
+      await expect(block).toBeVisible()
+      await block.click()
+      const editor = pdf.locator('.pdf-content-editor-text')
+      await editor.fill('Unapplied text')
+      await pdf.locator('.pdf-content-toolbar button[title="Bold (Ctrl+B)"]').click()
+      await expect(editor).toHaveValue('Unapplied text')
+      await pdf
+        .locator('.pdf-page')
+        .first()
+        .click({ position: { x: 20, y: 20 } })
+      await expect(editor).toHaveCount(0)
+      expect(await fileDigest(path)).toBe(original)
+      await block.click()
+      await expect(editor).toHaveValue('Hello world')
+      await editor.fill('Applied text')
+      await pdf.locator('.pdf-content-toolbar button', { hasText: 'Apply' }).click()
+      await expect(pdf.locator('.pdf-content-edit-img')).toHaveCount(1)
+      await block.click()
+      await editor.fill('Discard this')
+      await pdf
+        .locator('.pdf-page')
+        .first()
+        .click({ position: { x: 20, y: 20 } })
+      await expect(editor).toHaveCount(0)
+      await block.click()
+      await expect(editor).toHaveValue('Applied text')
+      await pdf.locator('.pdf-content-toolbar button', { hasText: 'Cancel' }).click()
+    } finally {
+      await closeReader(launched)
+    }
+  })
+
   test('edits a text line and saves an additive FreeText replacement to disk', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'arareader-edit-'))
     const path = join(dir, 'document.pdf')
@@ -1090,7 +1166,10 @@ test.describe('direct content editing', () => {
       })
       await expect(pdf.locator('.pdf-row').first()).toBeInViewport()
       await page.locator('.tab-exit-read').click()
-      await expect(editor).toHaveValue('Edited text')
+      await expect(editor).toHaveCount(0)
+      await block.click()
+      await expect(editor).toHaveValue('Hello world')
+      await editor.fill('Edited text')
       await editor.press('Enter')
       await expect(pdf.locator('.pdf-content-edit-img')).toHaveCount(1)
 
@@ -1118,6 +1197,77 @@ test.describe('direct content editing', () => {
 })
 
 test.describe('view modes', () => {
+  test('footer page layout switch works in Select and Edit and stays in sync with Read mode', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'arareader-footer-spread-'))
+    const path = join(dir, 'document.pdf')
+    await writeTestPdf(path, 4)
+    const launched = await launchApp({ openFile: path })
+    try {
+      const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
+      await pdf.setViewportSize({ width: 980, height: 700 })
+      const footer = pdf.locator('.status-view-switch')
+      const single = footer.getByRole('button', { name: 'Single page' })
+      const dual = footer.getByRole('button', { name: 'Two pages' })
+      await expect(single).toBeVisible({ timeout: 3000 })
+      await expect(single).toBeInViewport()
+      await expect(dual).toBeInViewport()
+      await expect(pdf.locator('.zoom-slider')).toBeInViewport()
+      await expect(pdf.locator('.status-item').first()).toBeInViewport()
+      await expect(single).toHaveAttribute('aria-pressed', 'true')
+      await dual.click()
+      await expect(dual).toHaveAttribute('aria-pressed', 'true')
+      await expect(pdf.locator('.pdf-row').first().locator('.pdf-page')).toHaveCount(2)
+      await pdf.locator('.ribbon-mode-group button[title="Edit PDF"]').click()
+      await expect(dual).toHaveAttribute('aria-pressed', 'true')
+      await single.click()
+      await expect(single).toHaveAttribute('aria-pressed', 'true')
+      await expect(pdf.locator('.pdf-row').first().locator('.pdf-page')).toHaveCount(1)
+      await pdf.locator('.ribbon-tab', { hasText: 'View' }).click()
+      await pdf.locator('.rb-big[title="Two pages"]').click()
+      await expect(dual).toHaveAttribute('aria-pressed', 'true')
+      await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
+      await expect(launched.page.getByRole('button', { name: 'Two pages' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      )
+    } finally {
+      await closeReader(launched)
+    }
+  })
+
+  test('changes the page spread from the Read mode header', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'arareader-read-spread-'))
+    const path = join(dir, 'document.pdf')
+    const second = join(dir, 'second.pdf')
+    await writeTestPdf(path, 4)
+    await writeTestPdf(second, 2)
+    const launched = await launchApp({ openFile: path })
+    try {
+      const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
+      await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
+      const twoPages = launched.page.getByRole('button', { name: 'Two pages' })
+      await twoPages.click()
+      await expect(twoPages).toHaveAttribute('aria-pressed', 'true')
+      await expect(pdf.locator('.pdf-row').first().locator('.pdf-page')).toHaveCount(2)
+      const singlePage = launched.page.getByRole('button', { name: 'Single page' })
+      await singlePage.click()
+      await expect(singlePage).toHaveAttribute('aria-pressed', 'true')
+      await expect(pdf.locator('.pdf-row').first().locator('.pdf-page')).toHaveCount(1)
+      await twoPages.click()
+      await expect(twoPages).toHaveAttribute('aria-pressed', 'true')
+      await launched.page.evaluate((file) => window.reader.openPath(file), second)
+      await expect(launched.page.locator('.tab-item', { hasText: 'second.pdf' })).toBeVisible()
+      await expect(twoPages).toHaveCount(0)
+      await launched.page.locator('.tab-item', { hasText: 'document.pdf' }).click()
+      await expect(twoPages).toHaveAttribute('aria-pressed', 'true')
+      await launched.page.locator('.tab-exit-read').click()
+      await pdf.locator('.ribbon-tab', { hasText: 'View' }).click()
+      await expect(pdf.locator('.rb-big[title="Two pages"]')).toHaveClass(/active/)
+    } finally {
+      await closeReader(launched)
+    }
+  })
+
   test('flips between continuous scrolling and whole-page turns', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'arareader-view-'))
     const path = join(dir, 'document.pdf')
@@ -1153,17 +1303,18 @@ test.describe('view modes', () => {
       await pdf.keyboard.press('Escape')
       await expect(pdf.locator('.pdf-search-bar')).toHaveCount(0)
 
-      // An in-progress content edit survives turning away from its page
+      // Clicking a thumbnail cancels an in-progress content edit
       await pdf.locator('.rb-big[title="Edit PDF"]').click()
       await pdf.locator('.pdf-content-block').first().click()
       const editor = pdf.locator('.pdf-content-editor-text')
       await editor.fill('Draft while paged')
       await pdf.locator('.pdf-thumb').nth(1).click()
-      // The draft-bearing row stays mounted but hidden, so only one page is on screen
+      await expect(editor).toHaveCount(0)
       await expect(pdf.locator('.pdf-page:visible')).toHaveAttribute('data-orig-idx', '1')
       await pdf.locator('.pdf-thumb').first().click()
-      await expect(editor).toBeVisible()
-      await expect(editor).toHaveValue('Draft while paged')
+      await pdf.locator('.pdf-content-block').first().click()
+      await expect(editor).toHaveValue('Hello world')
+      await editor.press('Escape')
 
       // Whole-page turns stay clamped at the document ends
       await pdf.locator('.pdf-thumb').nth(2).click()
@@ -1192,7 +1343,7 @@ test.describe('view modes', () => {
 
       // Read mode hides the footer; the host header carries the same switch
       await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
-      const headerSwitch = page.locator('.tab-view-switch')
+      const headerSwitch = page.locator('.tab-view-switch[aria-label="View mode"]')
       const headerPaged = headerSwitch.locator('[title="Page by page"]')
       const headerContinuous = headerSwitch.locator('[title="Continuous"]')
       await expect(headerSwitch).toBeVisible()
