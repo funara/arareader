@@ -91,6 +91,7 @@ export const strings = {
     aiStopped: '已停止',
     aiStopping: '正在停止：等待当前操作完成。已应用的更改不会撤销。',
     aiFailed: '失败',
+    aiHistory: '历史记录',
     aiEarlierConversation: '之前的对话（{count}）',
     aiJumpToLatest: '跳到最新',
     aiResizePanel: '调整助手面板宽度',
@@ -339,6 +340,7 @@ export const strings = {
     aiStopped: 'Stopped',
     aiStopping: 'Stopping — finishing the current action. Changes already applied are kept.',
     aiFailed: 'Failed',
+    aiHistory: 'History',
     aiEarlierConversation: 'Earlier conversation ({count})',
     aiJumpToLatest: 'Jump to latest',
     aiResizePanel: 'Resize assistant panel',
@@ -591,6 +593,7 @@ export const strings = {
     aiStopped: '停止しました',
     aiStopping: '停止中：実行中の操作の完了を待っています。適用済みの変更は元に戻りません。',
     aiFailed: '失敗',
+    aiHistory: '履歴',
     aiEarlierConversation: '以前の会話（{count}）',
     aiJumpToLatest: '最新へ移動',
     aiResizePanel: 'アシスタントパネルの幅を変更',
@@ -844,6 +847,7 @@ export const strings = {
     aiStopping:
       '중지 중: 진행 중인 작업이 끝날 때까지 기다립니다. 이미 적용된 변경은 되돌려지지 않습니다.',
     aiFailed: '실패',
+    aiHistory: '기록',
     aiEarlierConversation: '이전 대화 ({count})',
     aiJumpToLatest: '최신으로 이동',
     aiResizePanel: '어시스턴트 패널 너비 조정',
@@ -1097,6 +1101,7 @@ export const strings = {
     aiStopping:
       "Arrêt en cours : l'action en cours se termine. Les modifications déjà appliquées sont conservées.",
     aiFailed: 'Échec',
+    aiHistory: 'Historique',
     aiEarlierConversation: 'Conversation précédente ({count})',
     aiJumpToLatest: 'Aller au plus récent',
     aiResizePanel: 'Redimensionner le panneau de l’assistant',
@@ -1351,6 +1356,7 @@ export const strings = {
     aiStopping:
       'Wird gestoppt — die laufende Aktion wird noch abgeschlossen. Bereits angewendete Änderungen bleiben erhalten.',
     aiFailed: 'Fehlgeschlagen',
+    aiHistory: 'Verlauf',
     aiEarlierConversation: 'Frühere Unterhaltung ({count})',
     aiJumpToLatest: 'Zum Neuesten springen',
     aiResizePanel: 'Breite des Assistenten ändern',
@@ -1604,6 +1610,7 @@ export const strings = {
     aiStopping:
       'Deteniendo: se está terminando la acción actual. Los cambios ya aplicados se conservan.',
     aiFailed: 'Falló',
+    aiHistory: 'Historial',
     aiEarlierConversation: 'Conversación anterior ({count})',
     aiJumpToLatest: 'Ir a lo más reciente',
     aiResizePanel: 'Cambiar el ancho del panel del asistente',
@@ -1857,6 +1864,7 @@ export const strings = {
     aiStopping:
       'กำลังหยุด: กำลังรอให้การทำงานปัจจุบันเสร็จสิ้น การเปลี่ยนแปลงที่ใช้แล้วจะไม่ถูกย้อนกลับ',
     aiFailed: 'ล้มเหลว',
+    aiHistory: 'ประวัติ',
     aiEarlierConversation: 'บทสนทนาก่อนหน้า ({count})',
     aiJumpToLatest: 'ไปยังข้อความล่าสุด',
     aiResizePanel: 'ปรับความกว้างแผงผู้ช่วย',
@@ -2108,6 +2116,7 @@ export const strings = {
     aiStopping:
       'Menghentikan — menyelesaikan tindakan yang sedang berjalan. Perubahan yang sudah diterapkan tetap ada.',
     aiFailed: 'Gagal',
+    aiHistory: 'Riwayat',
     aiEarlierConversation: 'Percakapan sebelumnya ({count})',
     aiJumpToLatest: 'Lompat ke terbaru',
     aiResizePanel: 'Ubah lebar panel asisten',
@@ -2362,6 +2371,7 @@ export const strings = {
     aiStopped: 'Остановлено',
     aiStopping: 'Остановка: текущее действие завершается. Уже применённые изменения сохраняются.',
     aiFailed: 'Ошибка',
+    aiHistory: 'История',
     aiEarlierConversation: 'Предыдущий разговор ({count})',
     aiJumpToLatest: 'Перейти к последнему',
     aiResizePanel: 'Изменить ширину панели ассистента',
@@ -2611,6 +2621,7 @@ export const strings = {
     aiStopped: 'تم الإيقاف',
     aiStopping: 'جارٍ الإيقاف — يتم إنهاء الإجراء الحالي. التغييرات المطبَّقة بالفعل تبقى.',
     aiFailed: 'فشل',
+    aiHistory: 'السجل',
     aiEarlierConversation: 'المحادثة السابقة ({count})',
     aiJumpToLatest: 'الانتقال إلى الأحدث',
     aiResizePanel: 'تغيير عرض لوحة المساعد',
@@ -2860,6 +2871,7 @@ export const strings = {
     aiStopped: 'Parado',
     aiStopping: 'A parar — a concluir a ação atual. As alterações já aplicadas mantêm-se.',
     aiFailed: 'Falhou',
+    aiHistory: 'Histórico',
     aiEarlierConversation: 'Conversa anterior ({count})',
     aiJumpToLatest: 'Ir para o mais recente',
     aiResizePanel: 'Redimensionar o painel do assistente',
@@ -3116,6 +3128,7 @@ export const strings = {
     aiStopping:
       "Interruzione: l'azione in corso viene completata. Le modifiche già applicate restano.",
     aiFailed: 'Non riuscito',
+    aiHistory: 'Cronologia',
     aiEarlierConversation: 'Conversazione precedente ({count})',
     aiJumpToLatest: 'Vai al più recente',
     aiResizePanel: 'Ridimensiona il pannello dell’assistente',
@@ -3370,6 +3383,7 @@ export const strings = {
     aiStopping:
       'Zatrzymywanie — trwająca operacja zostanie dokończona. Już zastosowane zmiany pozostają.',
     aiFailed: 'Niepowodzenie',
+    aiHistory: 'Historia',
     aiEarlierConversation: 'Wcześniejsza rozmowa ({count})',
     aiJumpToLatest: 'Przejdź do najnowszego',
     aiResizePanel: 'Zmień szerokość panelu asystenta',
@@ -3624,6 +3638,7 @@ export const strings = {
     aiStopping:
       'Stoppen — de huidige actie wordt afgerond. Al toegepaste wijzigingen blijven staan.',
     aiFailed: 'Mislukt',
+    aiHistory: 'Geschiedenis',
     aiEarlierConversation: 'Eerdere gesprek ({count})',
     aiJumpToLatest: 'Naar het nieuwste',
     aiResizePanel: 'Breedte van assistentpaneel wijzigen',
@@ -3878,6 +3893,7 @@ export const strings = {
     aiStopping:
       'Menghentikan — tindakan semasa sedang diselesaikan. Perubahan yang sudah digunakan dikekalkan.',
     aiFailed: 'Gagal',
+    aiHistory: 'Sejarah',
     aiEarlierConversation: 'Perbualan terdahulu ({count})',
     aiJumpToLatest: 'Pergi ke terkini',
     aiResizePanel: 'Ubah saiz panel pembantu',
@@ -4130,6 +4146,7 @@ export const strings = {
     aiStopped: 'הופסק',
     aiStopping: 'עוצר — הפעולה הנוכחית מסתיימת. שינויים שכבר הוחלו נשמרים.',
     aiFailed: 'נכשל',
+    aiHistory: 'היסטוריה',
     aiEarlierConversation: 'שיחה קודמת ({count})',
     aiJumpToLatest: 'קפיצה לאחרון',
     aiResizePanel: 'שינוי רוחב חלונית העוזר',
@@ -4379,6 +4396,7 @@ export const strings = {
     aiStopping:
       'रोका जा रहा है — वर्तमान क्रिया पूरी हो रही है। पहले लागू किए गए बदलाव बने रहते हैं।',
     aiFailed: 'विफल',
+    aiHistory: 'इतिहास',
     aiEarlierConversation: 'पिछली बातचीत ({count})',
     aiJumpToLatest: 'नवीनतम पर जाएँ',
     aiResizePanel: 'सहायक पैनल का आकार बदलें',
@@ -4631,6 +4649,7 @@ export const strings = {
     aiStopping:
       'रोका जा रहा है — वर्तमान क्रिया पूरी हो रही है। पहले लागू किए गए बदलाव बने रहते हैं।',
     aiFailed: 'विफल',
+    aiHistory: '歷史紀錄',
     aiEarlierConversation: 'पिछली बातचीत ({count})',
     aiJumpToLatest: '跳到最新',
     aiResizePanel: '調整助手面板寬度',

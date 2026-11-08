@@ -10,6 +10,7 @@ export interface AiPanelHeaderProps {
   readonly onCollapse?: (() => void) | undefined
   readonly showNewChat?: boolean | undefined
   readonly newChatIcon?: ReactNode | undefined
+  readonly actionExpanded?: boolean | undefined
   readonly collapseIcon?: ReactNode | undefined
   readonly onTriggerScan?: (() => void) | undefined
   readonly isScanning?: boolean | undefined
@@ -33,6 +34,7 @@ export function AiPanelHeader({
   onCollapse,
   showNewChat = Boolean(onNewChat),
   newChatIcon = <IconNewChat size={15} />,
+  actionExpanded,
   collapseIcon = <IconSidebarCollapse size={15} />,
   onTriggerScan,
   isScanning = false,
@@ -87,6 +89,7 @@ export function AiPanelHeader({
             onClick={onNewChat}
             title={newChatLabel}
             aria-label={newChatLabel}
+            aria-expanded={actionExpanded}
           >
             {newChatIcon}
           </button>

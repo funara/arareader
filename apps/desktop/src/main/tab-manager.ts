@@ -118,8 +118,8 @@ export class TabManager {
     this.activateTab(HOME_ID)
   }
 
-  openPdfTab(openPath: string): string {
-    const view = createPdfView(openPath)
+  openPdfTab(openPath: string, freshChat = false): string {
+    const view = createPdfView(openPath, freshChat)
     const id = `t${this.nextId++}`
     this.window.contentView.addChildView(view)
     view.setVisible(false)

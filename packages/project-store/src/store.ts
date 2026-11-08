@@ -324,6 +324,7 @@ export class ProjectStore {
     const existing = this.readProject('default')
     if (existing) return existing
 
+    const index = this.readIndex(true)
     const now = nowIso()
     const data: ProjectData = {
       id: 'default',
@@ -335,8 +336,6 @@ export class ProjectStore {
     ensureDir(this.projectDir('default'))
     this.writeProject(data)
 
-    // strict: the empty default must not replace an index we failed to read
-    const index = this.readIndex(true)
     if (!index.projects.find((p) => p.id === 'default')) {
       index.projects.unshift({ id: data.id, name: data.name, createdAt: now, updatedAt: now })
       this.writeIndex(index)
@@ -789,6 +788,7 @@ export class ProjectStore {
   createProject(name: string): ProjectData {
     const trimmed = name.trim()
     if (!trimmed) throw new Error('Project name cannot be empty')
+    const index = this.readIndex(true)
     const now = nowIso()
     // Generate a stable yet unique id
     const hash = createHash('sha256')
@@ -805,7 +805,6 @@ export class ProjectStore {
     }
     ensureDir(this.projectDir(id))
     this.writeProject(data)
-    const index = this.readIndex()
     // Append at the end (default always stays first)
     index.projects.push({ id, name: trimmed, createdAt: now, updatedAt: now })
     this.writeIndex(index)
@@ -822,10 +821,10 @@ export class ProjectStore {
     const now = nowIso()
     const proj = this.readProject(id)
     if (!proj) throw new Error(`Project does not exist: ${id}`)
+    const index = this.readIndex(true)
     proj.name = trimmed
     proj.updatedAt = now
     this.writeProject(proj)
-    const index = this.readIndex()
     const entry = index.projects.find((p) => p.id === id)
     if (entry) {
       entry.name = trimmed
@@ -845,6 +844,8 @@ export class ProjectStore {
     if (id === 'default') throw new Error('The default project cannot be deleted')
     const proj = this.readProject(id)
     if (!proj) throw new Error(`Project does not exist: ${id}`)
+    this.ensureDefaultProject()
+    const index = this.readIndex(true)
 
     // 1. Soft-delete the directory
     const src = this.projectDir(id)
@@ -860,8 +861,6 @@ export class ProjectStore {
     }
 
     // 2. Reassign this project's files in fileMap back to default
-    this.ensureDefaultProject()
-    const index = this.readIndex()
     const movedFiles: string[] = []
     for (const [filePath, pid] of Object.entries(index.fileMap)) {
       if (pid === id) {
@@ -893,7 +892,7 @@ export class ProjectStore {
    */
   moveFileToProject(filePath: string, targetProjectId: string): void {
     this.ensureDefaultProject()
-    const index = this.readIndex()
+    const index = this.readIndex(true)
     const fromProjectId = index.fileMap[filePath] ?? 'default'
 
     if (fromProjectId === targetProjectId) return // nothing to move

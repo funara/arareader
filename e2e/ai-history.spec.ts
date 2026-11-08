@@ -120,6 +120,7 @@ test.describe('pdf ai history', () => {
       // New chat: the visible conversation moves into the earlier block (nothing
       // is deleted) and the model context starts fresh.
       await pdf.locator('.ai-panel-header-actions button[aria-label="New chat"]').click()
+      await pdf.getByRole('button', { name: 'History' }).click()
       await expect(earlier).toHaveText(/Earlier conversation \(4\)/)
       await expect(pdf.locator('.ai-chat > .ai-msg')).toHaveCount(0)
 
@@ -134,6 +135,38 @@ test.describe('pdf ai history', () => {
         .toBe(4)
     } finally {
       await closeReader(launched)
+    }
+
+    // A fresh tab opened from Home's Recent list starts empty, without deleting
+    // the transcript. Collapsing and reopening the sidebar must not start it again.
+    const recent = await launchApp({ userDataDir })
+    try {
+      const item = recent.page.locator('.recent-item').filter({ hasText: 'document.pdf' })
+      await expect(item).toBeVisible()
+      await item.click()
+      const pdf = await waitForPageWithUrl(recent.app, 'pdf/out')
+      const history = pdf.getByRole('button', { name: 'History' })
+      await expect(history).toBeVisible()
+      await expect(history).toHaveAttribute('aria-expanded', 'false')
+      await expect(pdf.locator('.ai-chat > .ai-msg')).toHaveCount(0)
+      await history.click()
+      await expect(pdf.locator('.ai-msg-historic')).toHaveCount(4)
+      await expect(pdf.locator('.ai-chat')).toContainText('old question')
+      await expect(pdf.locator('.ai-chat')).toContainText('new question')
+      await pdf.getByRole('button', { name: 'Collapse panel' }).click()
+      await pdf.locator('.ai-rail').click()
+      await expect(history).toHaveAttribute('aria-expanded', 'true')
+      await expect(pdf.locator('.ai-msg-historic')).toHaveCount(4)
+      await expect
+        .poll(async () => {
+          const index = JSON.parse(
+            await readFile(join(userDataDir, 'projects', 'index.json'), 'utf8'),
+          ) as { chatBoundaryByChatId?: Record<string, number> }
+          return index.chatBoundaryByChatId?.[chatId]
+        })
+        .toBe(4)
+    } finally {
+      await closeReader(recent)
     }
   })
 })

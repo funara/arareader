@@ -15,6 +15,7 @@ import {
   IconBulb,
   IconCheck,
   IconChevronDown,
+  IconClock,
   IconCopy,
   IconFileText,
   IconNewChat,
@@ -236,6 +237,7 @@ export function AiPanel({
   preset,
   onClearPreset,
   filePath,
+  freshOnOpen = false,
 }: {
   api: PdfSkillDeps
   onCollapse: () => void
@@ -243,6 +245,7 @@ export function AiPanel({
   onClearPreset?: () => void
   /** Absolute path of the open document; keys the per-document chat transcript */
   filePath: string
+  freshOnOpen?: boolean
 }): ReactElement {
   const { lang, t } = useI18n()
   const { isReady } = useAiReady({
@@ -258,6 +261,7 @@ export function AiPanel({
    */
   const [historicChat, setHistoricChat] = useState<ChatEntry[]>([])
   const [showHistoric, setShowHistoric] = useState(true)
+  const freshOnOpenRef = useRef(freshOnOpen)
   const [prompt, setPrompt] = useState('')
   const [busy, setBusy] = useState(false)
   /** Stop was pressed while an action is still finishing (no rollback is implied) */
@@ -656,23 +660,26 @@ export function AiPanel({
         }
         let ok: boolean
         try {
-          ok = await project.appendChat({
-            projectId: ids.projectId,
-            chatId: ids.chatId,
-            role: write.role,
-            text: write.text,
-            ...(write.tools ? { tools: write.tools } : {}),
-            ...(write.attachments
-              ? {
-                  attachments: write.attachments.map((a) => ({
-                    name: a.name,
-                    path: a.path,
-                    ext: a.ext,
-                    sizeBytes: a.sizeBytes,
-                  })),
-                }
-              : {}),
-            ...(write.status ? { status: write.status } : {}),
+          ok = await serializeIdentity(() => {
+            const target = chatRefIds.current ?? ids
+            return project.appendChat({
+              projectId: target.projectId,
+              chatId: target.chatId,
+              role: write.role,
+              text: write.text,
+              ...(write.tools ? { tools: write.tools } : {}),
+              ...(write.attachments
+                ? {
+                    attachments: write.attachments.map((attachment) => ({
+                      name: attachment.name,
+                      path: attachment.path,
+                      ext: attachment.ext,
+                      sizeBytes: attachment.sizeBytes,
+                    })),
+                  }
+                : {}),
+              ...(write.status ? { status: write.status } : {}),
+            })
           })
         } catch {
           ok = false
@@ -814,6 +821,7 @@ export function AiPanel({
   const commitNewChatBoundary = (): void => {
     const project = projectApi()
     if (!project) return
+    markBoundaryPending(true)
     writeChainRef.current = writeChainRef.current
       .then(async () => {
         const unsaved = failedWritesRef.current
@@ -865,6 +873,7 @@ export function AiPanel({
    * (an earlier-conversation card must never claim a completed run).
    */
   const performNewChat = (frozen?: ChatEntry[]): void => {
+    freshOnOpenRef.current = false
     sessionRef.current += 1
     pendingNewChatRef.current = false
     pendingStopRef.current = false
@@ -873,7 +882,7 @@ export function AiPanel({
     loopRef.current?.reset()
     appliedActionsRef.current = null
     setHistoricChat((prev) => mergeIntoHistory(frozen ?? chatStateRef.current, prev))
-    setShowHistoric(true)
+    setShowHistoric(false)
     setChat([])
     setPrompt('')
     attachmentsRef.current = []
@@ -899,7 +908,8 @@ export function AiPanel({
     scanAbortControllerRef.current?.abort()
     if (busyRef.current) {
       pendingNewChatRef.current = true
-      stop()
+      if (loopRef.current?.busy) stop()
+      else abortPendingRun()
       return
     }
     performNewChat()
@@ -1120,7 +1130,14 @@ export function AiPanel({
         // A New chat requested while this read was in flight owns the boundary
         // now: the stale read must not reset it to the old conversation's start.
         boundaryRef.current = boundarySeq
-        applyRestored(split)
+        if (freshOnOpenRef.current) {
+          freshOnOpenRef.current = false
+          setHistoricChat([...split.historic, ...split.active])
+          setShowHistoric(false)
+          commitNewChatBoundary()
+        } else {
+          applyRestored(split)
+        }
         setHistoryNotice(null)
         markHistoryState('ready')
       })
@@ -1436,8 +1453,7 @@ export function AiPanel({
   // Adaptive document context scan on first open (or on new chat) when AI is connected and aiAutoSuggestions is enabled.
   // The preference is fetched asynchronously, so "not known yet" must not scan either:
   // switching automatic recommendations off has to prevent the provider request outright.
-  // History settles first too: a scan for an empty welcome hub would be a wasted
-  // provider call whenever the document already has a conversation.
+  // Wait for the new-chat boundary before scanning an empty current conversation.
   useEffect(() => {
     if (aiAutoSuggestions !== true) {
       setSuggestions([])
@@ -1447,8 +1463,8 @@ export function AiPanel({
     if (
       !isReady ||
       historyState !== 'ready' ||
+      boundaryPending ||
       chat.length > 0 ||
-      historicChat.length > 0 ||
       userCanceledScanRef.current
     ) {
       setScanningContext(false)
@@ -1567,15 +1583,7 @@ export function AiPanel({
       abortCtrl.abort()
       if (pollTimer !== undefined) window.clearTimeout(pollTimer)
     }
-  }, [
-    isReady,
-    aiAutoSuggestions,
-    filePath,
-    scanNonce,
-    chat.length,
-    historicChat.length,
-    historyState,
-  ])
+  }, [isReady, aiAutoSuggestions, filePath, scanNonce, chat.length, historyState, boundaryPending])
 
   /** newest user message: the only one whose retry is not a duplicate */
   const lastUserIndex = chat.reduce(
@@ -1651,18 +1659,33 @@ export function AiPanel({
         title="ARA Assistant"
         onTriggerScan={handleGatherContextClick}
         isScanning={scanningContext}
-        showTriggerScan={chat.length === 0 && historicChat.length === 0}
+        showTriggerScan={chat.length === 0}
         triggerScanLabel={
           scanningContext
             ? 'Analyzing document context… (click to cancel)'
             : 'Analyze document context'
         }
-        showNewChat={historyState !== 'ready' || chat.length > 0 || historicChat.length > 0}
-        onNewChat={requestNewChat}
+        showNewChat
+        onNewChat={
+          historyState !== 'ready' || chat.length > 0 || busy
+            ? requestNewChat
+            : () => setShowHistoric((visible) => !visible)
+        }
         onCollapse={onCollapse}
-        newChatLabel={t('aiNewChat')}
+        newChatLabel={
+          historyState !== 'ready' || chat.length > 0 || busy ? t('aiNewChat') : t('aiHistory')
+        }
+        actionExpanded={
+          historyState !== 'ready' || chat.length > 0 || busy ? undefined : showHistoric
+        }
         collapseLabel={t('aiCollapsePanel')}
-        newChatIcon={<IconNewChat size={15} />}
+        newChatIcon={
+          historyState !== 'ready' || chat.length > 0 || busy ? (
+            <IconNewChat size={15} />
+          ) : (
+            <IconClock size={15} />
+          )
+        }
         collapseIcon={<IconSidebarCollapse size={15} />}
         live={busy}
       />
@@ -1706,7 +1729,14 @@ export function AiPanel({
                   // New chat / doc replacement invalidates this load
                   if (token !== sessionRef.current) return
                   boundaryRef.current = Math.max(boundaryRef.current, boundarySeq)
-                  applyRestored(split)
+                  if (freshOnOpenRef.current) {
+                    freshOnOpenRef.current = false
+                    setHistoricChat([...split.historic, ...split.active])
+                    setShowHistoric(false)
+                    commitNewChatBoundary()
+                  } else {
+                    applyRestored(split)
+                  }
                   markHistoryState('ready')
                 })
                 .catch(() => {
@@ -1731,7 +1761,7 @@ export function AiPanel({
           aria-label={t('aiConversation')}
         >
           {/* Earlier conversation: kept on disk and reachable here; never sent to the model */}
-          {historicChat.length > 0 && (
+          {historicChat.length > 0 && (showHistoric || chat.length > 0) && (
             <div className="ai-history-block">
               <button
                 type="button"
@@ -1824,7 +1854,7 @@ export function AiPanel({
                 ))}
             </div>
           )}
-          {chat.length === 0 && historicChat.length === 0 && (
+          {chat.length === 0 && (historicChat.length === 0 || !showHistoric) && (
             <div className="ai-chat-empty">
               {isReady ? (
                 <AiWelcomeHub

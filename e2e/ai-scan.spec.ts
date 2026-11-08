@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PDFDocument } from 'pdf-lib'
@@ -135,6 +136,72 @@ test.describe('adaptive suggestion scan (R8)', () => {
       await provider.close()
     }
   })
+
+  for (const enabled of [true, false]) {
+    test(`recent PDF with archived history respects scan preference: ${enabled}`, async () => {
+      const provider = await startFakeProvider()
+      const { userDataDir, pdfPath } = await makeProfile(provider.baseUrl, enabled)
+      const chatId = createHash('sha256').update(pdfPath).digest('hex').slice(0, 16)
+      const projectDir = join(userDataDir, 'projects', 'default')
+      const chatsDir = join(projectDir, 'chats')
+      await mkdir(chatsDir, { recursive: true })
+      await writeFile(join(userDataDir, 'recent.json'), JSON.stringify([pdfPath]))
+      await writeFile(
+        join(userDataDir, 'projects', 'index.json'),
+        JSON.stringify({
+          projects: [],
+          fileMap: { [pdfPath]: 'default' },
+          chatIdByPath: { [pdfPath]: chatId },
+        }),
+      )
+      await writeFile(
+        join(projectDir, 'project.json'),
+        JSON.stringify({
+          id: 'default',
+          name: 'Default Project',
+          createdAt: '',
+          updatedAt: '',
+          files: [pdfPath],
+        }),
+      )
+      const transcript = [
+        { seq: 0, ts: '', role: 'user', text: 'previous question' },
+        { seq: 1, ts: '', role: 'assistant', text: 'previous answer' },
+      ]
+      await writeFile(
+        join(chatsDir, `${chatId}.jsonl`),
+        `${transcript.map((message) => JSON.stringify(message)).join('\n')}\n`,
+      )
+      const launched = await launchApp({ userDataDir })
+      try {
+        await launched.page.locator('.recent-item').filter({ hasText: 'paper.pdf' }).click()
+        const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
+        await expect(pdf.getByRole('button', { name: 'History' })).toBeVisible()
+        if (enabled) {
+          await expect.poll(() => provider.requests.length, { timeout: 5000 }).toBe(1)
+          await expect(pdf.locator('.ai-welcome-hub')).toContainText('Tailored to this document')
+        } else {
+          await pdf.waitForTimeout(1500)
+          expect(provider.requests).toHaveLength(0)
+        }
+        await expect(
+          pdf
+            .locator('.ai-panel-header-actions')
+            .getByRole('button', { name: 'Analyze document context' }),
+        ).toBeVisible()
+        await pdf.getByRole('button', { name: 'History' }).click()
+        await expect(pdf.locator('.ai-msg-historic')).toHaveCount(2)
+        await pdf.getByRole('button', { name: 'History' }).click()
+        if (enabled) {
+          await expect(pdf.locator('.ai-welcome-hub')).toContainText('Tailored to this document')
+        }
+        expect(provider.requests).toHaveLength(enabled ? 1 : 0)
+      } finally {
+        await closeReader(launched)
+        await provider.close()
+      }
+    })
+  }
 
   test('turning the preference off prevents the automatic request', async () => {
     const provider = await startFakeProvider()

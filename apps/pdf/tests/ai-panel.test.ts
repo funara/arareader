@@ -113,6 +113,8 @@ function makeHarness(
   }
 
   const api = {
+    getPreferences: vi.fn(async () => ({ aiAutoSuggestions: false })),
+    aiChat: vi.fn(async () => ({ ok: true, content: '[]' })),
     getAiSettings: vi.fn<() => Promise<unknown>>(async () => READY_SETTINGS),
     onAiSettingsChanged: vi.fn(() => () => {}),
     onAiStream: vi.fn((handler: (chunk: Chunk) => void) => {
@@ -341,7 +343,11 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
     vi.restoreAllMocks()
   })
 
-  const mount = async (harness: Harness, filePath = '/tmp/doc.pdf'): Promise<void> => {
+  const mount = async (
+    harness: Harness,
+    filePath = '/tmp/doc.pdf',
+    freshOnOpen = false,
+  ): Promise<void> => {
     install(harness)
     await act(async () => {
       root.render(
@@ -351,6 +357,7 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
             api: harness.deps as unknown as PdfSkillDeps,
             onCollapse: () => {},
             filePath,
+            freshOnOpen,
           }),
         }),
       )
@@ -419,6 +426,69 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
     await act(async () => button!.click())
     await flush()
   }
+
+  it('waits for a recent-chat boundary before scanning, then scans again after New chat', async () => {
+    const harness = makeHarness({
+      history: [message({ seq: 0, role: 'user', text: 'previous question' })],
+    })
+    harness.api.getPreferences.mockResolvedValue({ aiAutoSuggestions: true })
+    vi.spyOn(harness.deps, 'doc').mockReturnValue({
+      numPages: 1,
+      getPage: async () => ({
+        getTextContent: async () => ({ items: [{ str: 'document content', hasEOL: false }] }),
+        cleanup: () => {},
+      }),
+    } as never)
+    let finishBoundary!: (value: { projectId: string; chatId: string; boundarySeq: number }) => void
+    harness.project.startNewChat = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishBoundary = resolve
+          }),
+      )
+      .mockResolvedValue({ projectId: 'p1', chatId: 'c1', boundarySeq: 3 })
+    await mount(harness, '/tmp/doc.pdf', true)
+    expect(harness.api.aiChat).not.toHaveBeenCalled()
+    await act(async () => finishBoundary({ projectId: 'p1', chatId: 'c1', boundarySeq: 1 }))
+    await flush()
+    expect(harness.api.aiChat).toHaveBeenCalledTimes(1)
+    harness.scripts.push((emit) => {
+      emit.delta('answer')
+      emit.done()
+    })
+    await send('question')
+    await clickLabel('New chat')
+    expect(harness.api.aiChat).toHaveBeenCalledTimes(2)
+  })
+
+  it('opens a recent document with a fresh chat and keeps its earlier conversation in History', async () => {
+    const history = makeFakeHistory('/tmp/draft.pdf')
+    history.live()
+    const harness = makeHarness()
+    harness.project = history.project
+    harness.scripts.push((emit) => {
+      emit.delta('fresh answer')
+      emit.done()
+    })
+    await mount(harness, '/tmp/draft.pdf', true)
+    expect(container.querySelectorAll('.ai-chat > .ai-msg')).toHaveLength(0)
+    expect(container.textContent).not.toContain('old question')
+    const historyButton = container.querySelector('button[aria-label="History"]')
+    expect(historyButton?.getAttribute('aria-expanded')).toBe('false')
+    await clickLabel('History')
+    expect(container.textContent).toContain('old question')
+    expect(historyButton?.getAttribute('aria-expanded')).toBe('true')
+    await clickLabel('History')
+    await send('fresh question')
+    expect(requestText(harness.requests[0]!)).toContain('fresh question')
+    expect(requestText(harness.requests[0]!)).not.toContain('old question')
+    expect(container.querySelector('button[aria-label="New chat"]')).toBeTruthy()
+    await clickLabel('New chat')
+    expect(container.querySelectorAll('.ai-chat > .ai-msg')).toHaveLength(0)
+    expect(container.querySelector('button[aria-label="History"]')).toBeTruthy()
+  })
 
   it('restores only the active conversation for a follow-up after a reload', async () => {
     const harness = makeHarness({
@@ -881,7 +951,7 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
     await act(async () => sendButton!.click())
     await flush(2)
 
-    // New chat while the run is still starting: it waits for the run to settle
+    // New chat cancels startup without waiting for settings to settle.
     await clickLabel('New chat')
     await act(async () => {
       rejectSettings?.(new Error('settings unavailable'))
@@ -889,11 +959,24 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
     })
     await flush()
 
-    // The failed turn moved into the earlier conversation with its real outcome,
-    // not as an empty placeholder that disagrees with the transcript on disk
-    expect(container.querySelectorAll('.ai-msg-historic')).toHaveLength(2)
-    expect(container.textContent).toContain('settings unavailable')
+    await clickLabel('History')
+    expect(container.querySelectorAll('.ai-msg-historic')).toHaveLength(1)
+    expect(container.textContent).not.toContain('settings unavailable')
     expect(container.textContent).toContain('never sent')
+    expect(harness.requests).toHaveLength(0)
+  })
+
+  it('starts a new chat immediately when pending settings never resolve', async () => {
+    const harness = makeHarness()
+    let holdSettings = false
+    harness.api.getAiSettings.mockImplementation(async () =>
+      holdSettings ? new Promise(() => {}) : READY_SETTINGS,
+    )
+    await mount(harness)
+    holdSettings = true
+    await send('never sent')
+    await clickLabel('New chat')
+    expect(container.querySelectorAll('.ai-chat > .ai-msg')).toHaveLength(0)
     expect(harness.requests).toHaveLength(0)
   })
 
@@ -925,7 +1008,30 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
     // and the cancelled request left no empty reply bubble behind
     expect(harness.requests).toHaveLength(0)
     expect(container.querySelectorAll('.ai-chat > .ai-msg')).toHaveLength(0)
+    await clickLabel('History')
     expect(container.textContent).toContain('Earlier conversation (1)')
+  })
+
+  it('starts a new chat without waiting for an image read and ignores its late result', async () => {
+    const harness = makeHarness()
+    harness.api.pickAttachments.mockResolvedValue({ accepted: [IMAGE], rejected: [] })
+    let resolveImage!: (value: { ok: boolean; base64: string; mime: string }) => void
+    harness.api.readAttachmentImage
+      .mockResolvedValueOnce({ ok: true, base64: 'PREVIEW', mime: 'image/png' })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveImage = resolve
+          }),
+      )
+    await mount(harness)
+    await clickLabel('Attach a file')
+    await send('describe this')
+    await clickLabel('New chat')
+    expect(container.querySelectorAll('.ai-chat > .ai-msg')).toHaveLength(0)
+    await act(async () => resolveImage({ ok: true, base64: 'AAAA', mime: 'image/png' }))
+    await flush()
+    expect(harness.requests).toHaveLength(0)
   })
 
   it('does not start a run whose image read resolves after the panel unmounts', async () => {
@@ -1207,6 +1313,7 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
     // reachable (display only) instead of waiting for a reload.
     expect(container.textContent).not.toContain('Starting a new conversation could not be saved')
     expect(history.boundaryOf('/tmp/saved.pdf')).toBe(2)
+    await clickLabel('History')
     expect(container.textContent).toContain('Earlier conversation (2)')
 
     // Reload: a fresh panel over the same store reads the durable boundary
@@ -1278,6 +1385,72 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
     await finishNewChatAndReload(history)
   })
 
+  it.each(['append-first', 'rebind-first', 'failed-append'])(
+    'keeps chat records ordered and reachable across Save As (%s)',
+    async (order) => {
+      const history = makeFakeHistory('/tmp/draft.pdf')
+      history.live()
+      const harness = makeHarness()
+      harness.project = history.project
+      const originalAppend = history.project.appendChat
+      const originalRebind = history.project.rebindChat
+      const events: string[] = []
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      let firstAppend = true
+      history.project.appendChat = vi.fn(async (args) => {
+        events.push(`append:${args.chatId}:${args.role}`)
+        if (firstAppend) {
+          firstAppend = false
+          if (order === 'append-first') await gate
+          if (order === 'failed-append') return false
+        }
+        return originalAppend(args)
+      })
+      history.project.rebindChat = vi.fn(async (args) => {
+        events.push('rebind')
+        if (order === 'rebind-first') await gate
+        return originalRebind(args)
+      })
+      harness.scripts.push((emit) => {
+        emit.delta('saved answer')
+        emit.done()
+      })
+      await mount(harness, '/tmp/draft.pdf')
+      if (order === 'rebind-first') await rerenderWithPath(harness, '/tmp/saved.pdf')
+      await send('saved question')
+      if (order !== 'rebind-first') await rerenderWithPath(harness, '/tmp/saved.pdf')
+      if (order === 'append-first') expect(events).toEqual(['append:chat-1:user'])
+      if (order === 'rebind-first') expect(events).toEqual(['rebind'])
+      release()
+      await flush()
+      if (order === 'failed-append') {
+        const retry = container.querySelector('.ai-history-notice button') as HTMLButtonElement
+        expect(retry).toBeTruthy()
+        await act(async () => retry.click())
+        await flush()
+      }
+      const ids = await history.project.resolveChat({ filePath: '/tmp/saved.pdf' })
+      const rows = await history.project.loadChat({ projectId: ids.projectId, chatId: ids.chatId })
+      expect(rows.map((row) => row.text)).toEqual([
+        'old question',
+        'old answer',
+        'saved question',
+        'saved answer',
+      ])
+      expect(rows.map((row) => row.seq)).toEqual([0, 1, 2, 3])
+      await act(async () => root.unmount())
+      root = createRoot(container)
+      const reload = makeHarness()
+      reload.project = history.project
+      await mount(reload, '/tmp/saved.pdf')
+      expect(container.textContent).toContain('saved question')
+      expect(container.textContent).toContain('saved answer')
+    },
+  )
+
   it('shows the earlier conversation in this session when New chat lands before a delayed load', async () => {
     const history = makeFakeHistory('/tmp/draft.pdf')
     const harness = makeHarness()
@@ -1298,6 +1471,7 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
 
     // The closed rows are reachable right away (no reload needed) and nothing of
     // the new conversation is shown yet
+    await clickLabel('History')
     expect(container.textContent).toContain('Earlier conversation (2)')
     expect(container.querySelectorAll('.ai-chat > .ai-msg')).toHaveLength(0)
 

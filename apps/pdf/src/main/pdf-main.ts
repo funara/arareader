@@ -1101,7 +1101,7 @@ function grantAndTrack(wc: WebContents, openPath?: string | null): void {
   })
 }
 
-export function createPdfView(openPath?: string | null): WebContentsView {
+export function createPdfView(openPath?: string | null, freshChat = false): WebContentsView {
   registerPdfIpc()
   const view = new WebContentsView({
     webPreferences: {
@@ -1116,7 +1116,19 @@ export function createPdfView(openPath?: string | null): WebContentsView {
   })
   view.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#0d0f13' : '#f3f4f6')
   grantAndTrack(view.webContents, openPath)
-  if (runtime.rendererUrl) void view.webContents.loadURL(runtime.rendererUrl)
-  else if (runtime.rendererFile) void view.webContents.loadFile(runtime.rendererFile)
+  if (runtime.rendererUrl) {
+    try {
+      const url = new URL(runtime.rendererUrl)
+      if (freshChat) url.searchParams.set('freshChat', '1')
+      void view.webContents.loadURL(url.toString())
+    } catch {
+      void view.webContents.loadURL(runtime.rendererUrl)
+    }
+  } else if (runtime.rendererFile) {
+    void view.webContents.loadFile(
+      runtime.rendererFile,
+      freshChat ? { query: { freshChat: '1' } } : {},
+    )
+  }
   return view
 }

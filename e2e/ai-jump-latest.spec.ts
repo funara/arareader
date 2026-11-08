@@ -81,6 +81,19 @@ test.describe('pdf ai navigation', () => {
       const chat = pdf.locator('.ai-chat')
       await expect(chat).toContainText('answer 19')
 
+      // Keyboard order follows the panel controls in both directions.
+      const splitter = pdf.getByRole('separator', { name: 'Resize assistant panel' })
+      const newChat = pdf.getByRole('button', { name: 'New chat' })
+      const collapse = pdf.getByRole('button', { name: 'Collapse panel' })
+      await splitter.focus()
+      await pdf.keyboard.press('Tab')
+      await expect(newChat).toBeFocused()
+      await pdf.keyboard.press('Tab')
+      await expect(collapse).toBeFocused()
+      await pdf.keyboard.press('Shift+Tab')
+      await expect(newChat).toBeFocused()
+      await expect(newChat).toHaveCSS('outline-style', 'solid')
+
       // Restored history opens on the newest message, so no jump control yet
       const atBottom = (): Promise<boolean> =>
         chat.evaluate(

@@ -4789,6 +4789,9 @@ export default function App() {
             key={aiPanelKey}
             api={aiApi}
             filePath={filePath}
+            freshOnOpen={
+              Boolean(filePath) && new URLSearchParams(window.location.search).has('freshChat')
+            }
             onCollapse={() => setAiCollapsed(true)}
             preset={aiPreset}
             onClearPreset={() => setAiPreset(null)}

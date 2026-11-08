@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -224,6 +232,51 @@ describe('chat read failures', () => {
     )
     expect(store.resolveChatForFile('/docs/kept.pdf')).toEqual(first)
     expect(store.chatBoundary('kept-chat')).toBe(1)
+  })
+
+  it.each(['malformed', 'unreadable'])(
+    'does not change projects or transcripts when the index is %s',
+    (failure) => {
+      const project = store.createProject('Retained project')
+      const path = '/docs/kept.pdf'
+      const ids = store.resolveChatForFile(path)
+      store.appendChatMessage(ids.projectId, ids.chatId, { role: 'assistant', text: 'keep' })
+      const chat = join(tmpDir, 'projects', 'default', 'chats', `${ids.chatId}.jsonl`)
+      const projectFile = join(tmpDir, 'projects', project.id, 'project.json')
+      const projectsDir = join(tmpDir, 'projects')
+      const beforeProject = readFileSync(projectFile, 'utf8')
+      const beforeChat = readFileSync(chat, 'utf8')
+      const beforeDirs = readdirSync(projectsDir).sort()
+      if (failure === 'malformed') writeFileSync(indexPath(), '{ malformed', 'utf8')
+      const beforeIndex = readFileSync(indexPath(), 'utf8')
+      if (failure === 'unreadable') controls.sourceReadFailures.add(indexPath())
+
+      for (const operation of [
+        () => store.createProject('Must not be created'),
+        () => store.renameProject(project.id, 'Must not be renamed'),
+        () => store.deleteProject(project.id),
+        () => store.moveFileToProject(path, project.id),
+      ]) {
+        expect(operation).toThrow()
+      }
+      controls.sourceReadFailures.clear()
+      expect(readFileSync(indexPath(), 'utf8')).toBe(beforeIndex)
+      expect(readFileSync(projectFile, 'utf8')).toBe(beforeProject)
+      expect(readFileSync(chat, 'utf8')).toBe(beforeChat)
+      expect(readdirSync(projectsDir).sort()).toEqual(beforeDirs)
+    },
+  )
+
+  it('does not create a default project when its existing index cannot be read', () => {
+    const fresh = join(tmpDir, 'fresh')
+    const projectsDir = join(fresh, 'projects')
+    mkdirSync(projectsDir, { recursive: true })
+    const index = join(projectsDir, 'index.json')
+    writeFileSync(index, '{ invalid', 'utf8')
+    const freshStore = new ProjectStore(fresh)
+    expect(() => freshStore.ensureDefaultProject()).toThrow(/not valid JSON/)
+    expect(existsSync(join(projectsDir, 'default'))).toBe(false)
+    expect(readFileSync(index, 'utf8')).toBe('{ invalid')
   })
 
   it('initializes an index that does not exist yet (ENOENT is not corruption)', () => {

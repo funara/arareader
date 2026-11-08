@@ -196,6 +196,7 @@ test.describe('pdf ai failure reporting (R1/R5)', () => {
 
       // The frozen conversation is reachable, and it says what really happened:
       // stopped, never a green "✓ Completed" for a run that was interrupted.
+      await pdf.getByRole('button', { name: 'History' }).click()
       const earlier = pdf.locator('.ai-history-sep')
       await expect(earlier).toHaveText(/Earlier conversation \(2\)/)
       await expect(pdf.locator('.ai-msg-historic')).toHaveCount(2)

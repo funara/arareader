@@ -298,7 +298,7 @@ const PDF_RE = /\.pdf$/i
 const REPO_URL = 'https://github.com/funara/arareader'
 
 /** validate + dedupe by path, open a PDF tab, and record it as recent */
-async function openDocumentPath(rawPath: string): Promise<boolean> {
+async function openDocumentPath(rawPath: string, freshChat = false): Promise<boolean> {
   const trimmed = typeof rawPath === 'string' ? rawPath.trim() : ''
   // argv / open-file paths can be relative to the launching CWD; the recents
   // list and tab dedupe both need one canonical form.
@@ -309,7 +309,7 @@ async function openDocumentPath(rawPath: string): Promise<boolean> {
   recordRecent(filePath)
   const existing = tabManager.findPdfTabByPath(filePath)
   if (existing) tabManager.activateTab(existing)
-  else tabManager.openPdfTab(filePath)
+  else tabManager.openPdfTab(filePath, freshChat)
   return true
 }
 
@@ -529,7 +529,7 @@ function registerHomeIpc(): void {
     readRecentPage(RECENT_FILE(), query),
   )
   ipcMain.handle(HOME_CHANNELS.openPath, async (_event: IpcMainInvokeEvent, path: unknown) => {
-    if (typeof path === 'string') await openDocumentPath(path)
+    if (typeof path === 'string') await openDocumentPath(path, true)
   })
   ipcMain.handle(HOME_CHANNELS.openPdf, () => openPdfViaDialog())
   ipcMain.handle(HOME_CHANNELS.newPdf, () => newPdfViaDialog())
