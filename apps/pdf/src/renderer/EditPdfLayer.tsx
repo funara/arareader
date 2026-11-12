@@ -153,6 +153,8 @@ export function EditPdfLayer({
   edits,
   readOnly,
   onCommit,
+  beginEdit,
+  onEditBlocked,
   onDraftActivity,
 }: {
   doc: PDFDocumentProxy
@@ -165,6 +167,8 @@ export function EditPdfLayer({
   edits: readonly PageContentEdit[]
   readOnly: boolean
   onCommit: (edit: PageContentEdit) => void
+  beginEdit?: () => (() => void) | null
+  onEditBlocked?: () => void
   onDraftActivity: (pageIndex: number, active: boolean) => void
 }): ReactElement {
   const rootRef = useRef<HTMLDivElement>(null)
@@ -635,9 +639,14 @@ export function EditPdfLayer({
   )
 
   const replaceImage = async (image: EditablePageImage, file: File) => {
-    const base = ensureImageEdit(image)
-    if (!base) return
+    const release = beginEdit ? beginEdit() : () => {}
+    if (!release) {
+      onEditBlocked?.()
+      return
+    }
     try {
+      const base = ensureImageEdit(image)
+      if (!base) return
       const png = await imageFileToPng(file)
       if (!png.image) return
       // Fit the replacement inside the existing box at its own aspect ratio, centered
@@ -660,6 +669,8 @@ export function EditPdfLayer({
       })
     } catch {
       // Undecodable file: leave the page untouched rather than half-replacing the image
+    } finally {
+      release()
     }
   }
 

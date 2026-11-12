@@ -1,6 +1,6 @@
 import { basename } from 'node:path'
 import type { BrowserWindow, Rectangle, WebContents, WebContentsView } from 'electron'
-import { createPdfView, pdfIsDirty, requestPdfClose } from '../../../pdf/src/main/pdf-main'
+import { createPdfView, requestPdfClose } from '../../../pdf/src/main/pdf-main'
 import type { TabKind, TabSummary } from '../shared/tabs-api'
 import { TAB_STRIP_HEIGHT } from '../shared/tabs-api'
 import { normalizePathKey } from './recent-files'
@@ -219,15 +219,14 @@ export class TabManager {
     )?.id
   }
 
-  /** PDF tabs whose renderer reports unsaved markups/form edits (close guard) */
-  dirtyPdfTabs(): Array<{ id: string; webContents: WebContents }> {
-    const dirty: Array<{ id: string; webContents: WebContents }> = []
+  /** Every PDF participates in the close handshake, including clean views with work in flight. */
+  pdfTabs(): Array<{ id: string; webContents: WebContents }> {
+    const tabs: Array<{ id: string; webContents: WebContents }> = []
     for (const tab of this.tabs) {
-      if (tab.kind === 'pdf' && tab.view && pdfIsDirty(tab.view.webContents.id)) {
-        dirty.push({ id: tab.id, webContents: tab.view.webContents })
-      }
+      if (tab.kind === 'pdf' && tab.view)
+        tabs.push({ id: tab.id, webContents: tab.view.webContents })
     }
-    return dirty
+    return tabs
   }
 
   /** move a tab to a new index in the strip; Home is pinned at index 0 */
@@ -251,12 +250,12 @@ export class TabManager {
     if (id === HOME_ID) return
     const tab = this.tabs.find((t) => t.id === id)
     if (!tab || this.closingIds.has(id)) return
-    if (tab.view && pdfIsDirty(tab.view.webContents.id)) {
+    if (tab.view) {
       // Bring the tab into view so the save prompt has visible context.
       if (this.activeId !== id) this.activateTab(id)
       this.closingIds.add(id)
       try {
-        if (!(await requestPdfClose(tab.view.webContents, this.window))) return
+        if (!(await requestPdfClose(tab.view.webContents, this.window)).approved) return
       } finally {
         this.closingIds.delete(id)
       }

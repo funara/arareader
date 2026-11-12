@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal, flushSync } from 'react-dom'
 import type { CSSProperties, ReactElement, ReactNode } from 'react'
 // legacy build: the modern build relies on new APIs like Math.sumPrecise that the current
 // Electron V8 lacks, making embedded font parsing fail and whole pages render as garbled raw char codes
@@ -51,7 +52,14 @@ import type { SplitMode } from './split'
 import type { SearchIndex, SearchMatch } from './search'
 import { useI18n, t as tModule } from './i18n/locale'
 import { htmlLang } from '@arareader/i18n'
-import { useAutosave } from './useAutosave'
+import { waitForSavesBeforeClosePrompt } from './close-prompt'
+import {
+  isReaderInteractionLocked,
+  saveStateAfterFailure,
+  trackSaveInFlight,
+  type PdfSaveState,
+} from './save-flight'
+import { isAutosaveAllowed, useAutosave } from './useAutosave'
 import type {
   DrawingInput,
   FormValueInput,
@@ -991,7 +999,30 @@ function SignDropOverlay({
 
 export default function App() {
   const { t, lang: uiLang } = useI18n()
+  const [autosaveEnabled, setAutosaveEnabled] = useState(false)
+  useEffect(() => {
+    let active = true
+    let receivedChange = false
+    const unsubscribe = window.pdfApi.onPreferencesChanged?.((prefs) => {
+      receivedChange = true
+      setAutosaveEnabled(prefs.autosave === true)
+    })
+    const preferences = window.pdfApi.getPreferences?.()
+    if (preferences) {
+      void preferences
+        .then((prefs) => {
+          if (active && !receivedChange) setAutosaveEnabled(prefs.autosave === true)
+        })
+        .catch(() => {})
+    }
+    return () => {
+      active = false
+      unsubscribe?.()
+    }
+  }, [])
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null)
+  const currentDocRef = useRef(doc)
+  currentDocRef.current = doc
   const [filePath, setFilePath] = useState('')
   const [aiPanelKey, setAiPanelKey] = useState(0)
   const [status, setStatus] = useState<'loading' | 'error' | 'empty' | 'password' | 'ready'>(
@@ -1121,14 +1152,31 @@ export default function App() {
   const [deleteToast, setDeleteToast] = useState(false)
   const toastTimerRef = useRef<number | null>(null)
   const [thumbMenu, setThumbMenu] = useState<ThumbMenu | null>(null)
-  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [saveState, setSaveState] = useState<PdfSaveState>('idle')
   const [saveError, setSaveError] = useState('')
+  const [saveErrorKind, setSaveErrorKind] = useState<'save' | 'operation'>('operation')
   /** Autosave gate: this file was saved explicitly at least once */
   /** Path waiting behind the unsaved-changes prompt (Save/Discard/Cancel) */
   const [pendingOpen, setPendingOpen] = useState<string | null>(null)
+  const pendingOpenRef = useRef<string | null>(null)
+  const closePromptActiveRef = useRef(false)
   /** dirty in ref form: openPath runs outside the render cycle (IPC mount, menu re-open) */
   const dirtyRef = useRef(false)
   const savedOnceRef = useRef(false)
+  /** Resolved when a running save lands; prompts must not race writes already in progress. */
+  const saveInFlightRef = useRef<Promise<boolean> | null>(null)
+  const saveAsInFlightRef = useRef<Promise<boolean> | null>(null)
+  const pendingReconcileRef = useRef<{ path: string; warning?: string } | null>(null)
+  const [pendingReconcile, setPendingReconcile] = useState(false)
+  const editProducersRef = useRef(0)
+  const [editProducerCount, setEditProducerCount] = useState(0)
+  const editIdleWaitersRef = useRef<Array<() => void>>([])
+  const directOperationRef = useRef(false)
+  const [directBusy, setDirectBusy] = useState(false)
+  const directInFlightRef = useRef<Promise<void> | null>(null)
+  const externalRefreshRef = useRef(false)
+  const externalRefreshNoticeRef = useRef('')
+  const [externalRefreshBusy, setExternalRefreshBusy] = useState(false)
   /** Last write/reload timestamp: the file watcher ignores echoes of our own atomic writes */
   const lastSaveAtRef = useRef(0)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -1296,7 +1344,7 @@ export default function App() {
         // The file on disk no longer matches the open document, so reload it — a stale doc would
         // otherwise write the removed content straight back on the next save
         setSanitizeReport(result.report)
-        await loadDoc(filePath, doc)
+        await refreshAfterDirectWrite()
       } catch (err) {
         opFailed(err instanceof Error ? err.message : String(err))
       } finally {
@@ -1354,6 +1402,7 @@ export default function App() {
     scrollRef,
     rows.length,
     '800px 0px',
+    status === 'ready',
   )
   // Deleting pages (or opening a shorter document) can leave the page pointer out of range
   useEffect(() => {
@@ -1382,7 +1431,7 @@ export default function App() {
     thumbsRef,
     pageCount,
     '400px 0px',
-    sidebar === 'thumbs',
+    status === 'ready' && sidebar === 'thumbs',
   )
 
   const loadDoc = useCallback(async (path: string, previous: PDFDocumentProxy | null) => {
@@ -1397,60 +1446,98 @@ export default function App() {
     const all: PageSize[] = new Array(total)
     const rots: number[] = new Array(total)
     const BATCH = 32
-    for (let start = 1; start <= total; start += BATCH) {
-      const end = Math.min(total, start + BATCH - 1)
-      await Promise.all(
-        Array.from({ length: end - start + 1 }, async (_, offset) => {
-          const i = start + offset
-          const page = await loaded.getPage(i)
-          // Unrotated size; display size is derived by geom from the total rotation
-          const vp = page.getViewport({ scale: 1, rotation: 0 })
-          all[i - 1] = { width: vp.width, height: vp.height }
-          rots[i - 1] = page.rotate ?? 0
-          return undefined
-        }),
-      )
-      setLoadProgress({ loaded: end, total })
-      if (end < total) {
-        await new Promise((r) => setTimeout(r, 0))
+    let loadedOutline: OutlineNode[] | null = null
+    try {
+      for (let start = 1; start <= total; start += BATCH) {
+        const end = Math.min(total, start + BATCH - 1)
+        await Promise.all(
+          Array.from({ length: end - start + 1 }, async (_, offset) => {
+            const i = start + offset
+            const page = await loaded.getPage(i)
+            // Unrotated size; display size is derived by geom from the total rotation
+            const vp = page.getViewport({ scale: 1, rotation: 0 })
+            all[i - 1] = { width: vp.width, height: vp.height }
+            rots[i - 1] = page.rotate ?? 0
+            return undefined
+          }),
+        )
+        setLoadProgress({ loaded: end, total })
+        if (end < total) {
+          await new Promise((r) => setTimeout(r, 0))
+        }
       }
+      try {
+        const outlineItems = await loaded.getOutline()
+        if (outlineItems && outlineItems.length > 0) loadedOutline = outlineItems as OutlineNode[]
+      } catch {
+        /* A document without readable bookmarks still opens normally */
+      }
+    } catch (error) {
+      void loaded.loadingTask.destroy()
+      throw error
     }
-    setSizes(all)
-    setBaseRots(rots)
-    setDoc(loaded)
-    setMarkups([])
-    setDrawings([])
-    setPageEdits([])
-    setStampCfg(null)
-    setFormEdits(new Map())
-    setRotations(new Map())
-    setDeleted(new Set())
-    setOrder(null)
-    setMetadata(null)
-    setFileSize(data.byteLength)
-    setSelected(null)
-    setDeleteToast(false)
-    setUndoStack([])
-    setRedoStack([])
-    void loaded.getOutline().then(
-      (o) => setOutline(o && o.length > 0 ? (o as OutlineNode[]) : null),
-      () => setOutline(null),
-    )
+    flushSync(() => {
+      setSizes(all)
+      setBaseRots(rots)
+      setDoc(loaded)
+      setMarkups([])
+      setDrawings([])
+      setPageEdits([])
+      setStampCfg(null)
+      setFormEdits(new Map())
+      setRotations(new Map())
+      setDeleted(new Set())
+      setOrder(null)
+      setMetadata(null)
+      setFileSize(data.byteLength)
+      setSelected(null)
+      setDeleteToast(false)
+      setUndoStack([])
+      setRedoStack([])
+      setOutline(loadedOutline)
+    })
     // pdfjs-dist 6.x removed PDFDocumentProxy.destroy(); go through the loading task
     if (previous) void previous.loadingTask.destroy()
+    return loadedOutline
   }, [])
 
   /** Re-read the open file from disk, keeping the reader's scroll position. Used by Save, the
    *  external-change watcher and Reload from disk; the timestamp keeps the watcher from echoing
    *  the write that triggered the reload. */
   const reloadDoc = useCallback(async () => {
-    const top = scrollRef.current?.scrollTop ?? 0
-    lastSaveAtRef.current = Date.now()
-    await loadDoc(filePath, doc)
-    requestAnimationFrame(() => {
-      if (scrollRef.current) scrollRef.current.scrollTop = top
-    })
-  }, [loadDoc, filePath, doc])
+    if (
+      externalRefreshRef.current ||
+      saveInFlightRef.current ||
+      saveAsInFlightRef.current ||
+      pendingReconcileRef.current ||
+      directOperationRef.current ||
+      editProducersRef.current ||
+      draftPages.size
+    )
+      return
+    externalRefreshRef.current = true
+    setExternalRefreshBusy(true)
+    setSaveState('saving')
+    try {
+      const top = scrollRef.current?.scrollTop ?? 0
+      lastSaveAtRef.current = Date.now()
+      await loadDoc(filePath, doc)
+      requestAnimationFrame(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = top
+      })
+    } finally {
+      externalRefreshRef.current = false
+      setExternalRefreshBusy(false)
+      if (externalRefreshNoticeRef.current) {
+        setSaveError(externalRefreshNoticeRef.current)
+        setSaveErrorKind('operation')
+        setSaveState('error')
+        externalRefreshNoticeRef.current = ''
+      } else {
+        setSaveState((current) => (current === 'saving' ? 'idle' : current))
+      }
+    }
+  }, [loadDoc, filePath, doc, draftPages])
 
   const doOpenPath = useCallback(
     async (path: string) => {
@@ -1461,7 +1548,32 @@ export default function App() {
         setFilePath(path)
         // A newly opened file starts outside the autosave gate
         savedOnceRef.current = false
-        await loadDoc(path, null)
+        const preferenceRequest = window.pdfApi.getPreferences?.()
+        const preferences = preferenceRequest ? await preferenceRequest.catch(() => null) : null
+        const openedOutline = await loadDoc(path, null)
+        switch (preferences?.defaultZoom) {
+          case 'fit-page':
+            fitModeRef.current = 'page'
+            break
+          case '100':
+            fitModeRef.current = null
+            setScale(1)
+            break
+          case '125':
+            fitModeRef.current = null
+            setScale(1.25)
+            break
+          default:
+            fitModeRef.current = 'width'
+        }
+        const defaultSidebar = preferences?.defaultSidebar ?? 'thumbs'
+        setSidebar(
+          defaultSidebar === 'none'
+            ? null
+            : defaultSidebar === 'outline' && !openedOutline
+              ? 'thumbs'
+              : defaultSidebar,
+        )
         setCurrentPage(1)
         setStatus('ready')
         requestAnimationFrame(() => {
@@ -1480,10 +1592,31 @@ export default function App() {
     [loadDoc],
   )
 
+  const cancelPendingOpen = () => {
+    if (saveState === 'saving') return
+    pendingOpenRef.current = null
+    setPendingOpen(null)
+  }
+
   /** Replacing the document loses pre-first-save edits with no recovery copy — prompt first */
   const openPath = useCallback(
     async (path: string) => {
+      if (saveInFlightRef.current) await saveInFlightRef.current
+      if (
+        saveAsInFlightRef.current ||
+        pendingReconcileRef.current ||
+        directOperationRef.current ||
+        editProducersRef.current ||
+        externalRefreshRef.current
+      ) {
+        setSaveError(
+          'A file operation or refresh is still pending. Finish it before opening another document.',
+        )
+        setSaveState('error')
+        return
+      }
       if (dirtyRef.current) {
+        pendingOpenRef.current = path
         setPendingOpen(path)
         return
       }
@@ -1503,16 +1636,23 @@ export default function App() {
     })()
   }, [openPath])
 
-  // Unsaved-changes prompt before openPath replaces the document. Save persists first and
-  // falls through to the open on success (failed save keeps the doc + prompt). Discard drops
-  // the pending edits; Cancel keeps the current document. saveState 'saving' → doOpenPath
-  // (any further save call resolves immediately against the fresh doc) — autosave already
-  // can't overlap it (blur/interval are paused while the modal blocks the window).
+  // Keep autosave paused until the decision completes. A failed Save leaves the prompt open;
+  // Discard closes the autosave gate before the next document begins loading.
   const confirmOpen = async (choice: 'save' | 'discard'): Promise<void> => {
-    const path = pendingOpen
-    setPendingOpen(null)
+    const path = pendingOpenRef.current
     if (!path) return
+    if (
+      pendingReconcileRef.current ||
+      saveAsInFlightRef.current ||
+      directOperationRef.current ||
+      editProducersRef.current
+    )
+      return
     if (choice === 'save' && !(await save())) return
+    if (pendingOpenRef.current !== path) return
+    if (choice === 'discard') savedOnceRef.current = false
+    pendingOpenRef.current = null
+    setPendingOpen(null)
     await doOpenPath(path)
   }
 
@@ -1702,6 +1842,14 @@ export default function App() {
   }
 
   const undo = () => {
+    if (
+      saveInFlightRef.current ||
+      saveAsInFlightRef.current ||
+      pendingReconcileRef.current ||
+      directOperationRef.current ||
+      externalRefreshRef.current
+    )
+      return
     const top = undoStack[undoStack.length - 1]
     if (!top) return
     setRedoStack((r) => [...r, snapshot()])
@@ -1711,6 +1859,14 @@ export default function App() {
   }
 
   const redo = () => {
+    if (
+      saveInFlightRef.current ||
+      saveAsInFlightRef.current ||
+      pendingReconcileRef.current ||
+      directOperationRef.current ||
+      externalRefreshRef.current
+    )
+      return
     const top = redoStack[redoStack.length - 1]
     if (!top) return
     setUndoStack((u) => [...u, snapshot()])
@@ -1951,11 +2107,42 @@ export default function App() {
     toastTimerRef.current = window.setTimeout(() => setDeleteToast(false), 5000)
   }
 
-  const opFailed = (error: string) => {
+  const opFailed = (error: string, kind: 'save' | 'operation' = 'operation') => {
     setSaveError(error)
-    setSaveState('error')
+    setSaveErrorKind(kind)
+    const duringDirectOperation = directOperationRef.current
+    setSaveState((current) =>
+      duringDirectOperation ? 'error' : saveStateAfterFailure(current, kind),
+    )
     // The status bar is behind the Organize grid, which covers the full window
     setOrganizeError(error)
+  }
+
+  const reportBlockedEdit = (message: string) => {
+    if (externalRefreshRef.current) externalRefreshNoticeRef.current = message
+    else opFailed(message)
+  }
+
+  const beginEdit = (expectedDoc = doc): (() => void) | null => {
+    if (
+      expectedDoc !== currentDocRef.current ||
+      closePromptActiveRef.current ||
+      saveInFlightRef.current ||
+      saveAsInFlightRef.current ||
+      pendingReconcileRef.current ||
+      directOperationRef.current ||
+      externalRefreshRef.current
+    )
+      return null
+    editProducersRef.current++
+    setEditProducerCount(editProducersRef.current)
+    return () => {
+      editProducersRef.current--
+      setEditProducerCount(editProducersRef.current)
+      if (!editProducersRef.current) {
+        for (const resolve of editIdleWaitersRef.current.splice(0)) resolve()
+      }
+    }
   }
 
   /** Pending edits in SavePdfRequest form; shared by in-place Save and Save As */
@@ -1975,69 +2162,155 @@ export default function App() {
     }
   }
 
-  /** Resolved when the running save() lands; Save As serializes behind it */
-  const saveInFlightRef = useRef<Promise<boolean> | null>(null)
+  const reconcileWritten = async (): Promise<boolean> => {
+    const pending = pendingReconcileRef.current
+    if (!pending) return true
+    setSaveState('saving')
+    try {
+      const top = scrollRef.current?.scrollTop ?? 0
+      lastSaveAtRef.current = Date.now()
+      await loadDoc(pending.path, doc)
+      dirtyRef.current = false
+      window.pdfApi.setDirty(false)
+      pendingReconcileRef.current = null
+      setPendingReconcile(false)
+      requestAnimationFrame(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = top
+      })
+      if (pending.warning) {
+        setSaveState('idle')
+        opFailed(
+          `Saved to ${pending.path}, but the host could not finish updating the tab: ${pending.warning}. Reopen the saved copy if the tab is incorrect.`,
+        )
+      } else {
+        setSaveState('saved')
+        setTimeout(() => setSaveState((s) => (s === 'saved' ? 'idle' : s)), 2000)
+      }
+      return true
+    } catch (err) {
+      setSaveState('idle')
+      opFailed(
+        `Written to ${pending.path}; refresh failed. Retry refresh. ${err instanceof Error ? err.message : String(err)}`,
+      )
+      return false
+    }
+  }
 
-  const save = (autosave = false): Promise<boolean> => {
+  const save = (autosave = false, closeSave = false): Promise<boolean> => {
+    if (closePromptActiveRef.current && !closeSave) return Promise.resolve(false)
+    if (saveInFlightRef.current) return saveInFlightRef.current
+    if (saveAsInFlightRef.current) {
+      if (!autosave) {
+        void saveAsInFlightRef.current.then((hasError) => {
+          const retry = 'Please retry Save after Save As.'
+          if (hasError) {
+            setSaveError((error) => `${error} ${retry}`)
+            setOrganizeError((error) => `${error} ${retry}`)
+          } else opFailed(retry)
+        })
+      }
+      return Promise.resolve(false)
+    }
+    if (
+      editProducersRef.current ||
+      directOperationRef.current ||
+      externalRefreshRef.current ||
+      draftPages.size
+    ) {
+      if (!autosave) opFailed('An edit or file operation is still in progress. Please retry Save.')
+      return Promise.resolve(false)
+    }
+    if (pendingReconcileRef.current) return trackSaveInFlight(saveInFlightRef, reconcileWritten)
     if (!dirty || saveState === 'saving' || !filePath) return Promise.resolve(!dirty)
-    // An explicit save opts this file into autosave
-    if (!autosave) savedOnceRef.current = true
-    const run = (async (): Promise<boolean> => {
+    return trackSaveInFlight(saveInFlightRef, async (): Promise<boolean> => {
       setSaveState('saving')
       // The write itself will show up in the file watcher: don't reload for our own bytes
       lastSaveAtRef.current = Date.now()
-      const result = await window.pdfApi.save({ path: filePath, ...editsPayload() })
-      if (!result.ok) {
-        opFailed(result.error)
+      let result: Awaited<ReturnType<typeof window.pdfApi.save>>
+      try {
+        result = await window.pdfApi.save({ path: filePath, ...editsPayload() })
+      } catch (err) {
+        opFailed(err instanceof Error ? err.message : String(err), 'save')
         return false
       }
-      // Reload: changes are in the file now, canvas renders directly, overlays/pending ops are cleared
-      try {
-        await reloadDoc()
-      } catch {
-        /* Save already succeeded; a reload failure doesn't block (takes effect on next open) */
+      if (!result.ok) {
+        opFailed(result.error, 'save')
+        return false
       }
-      setSaveState('saved')
-      setTimeout(() => setSaveState((s) => (s === 'saved' ? 'idle' : s)), 2000)
-      return true
-    })()
-    const tracked = run.finally(() => {
-      if (saveInFlightRef.current === tracked) saveInFlightRef.current = null
+      // Only a successful manual write opts this file into future autosaves.
+      if (!autosave) savedOnceRef.current = true
+      pendingReconcileRef.current = { path: filePath }
+      setPendingReconcile(true)
+      return reconcileWritten()
     })
-    saveInFlightRef.current = tracked
-    return tracked
   }
 
   /** Save As: pick a target, write the edited document there, and keep editing the copy */
-  const saveAs = async (): Promise<void> => {
-    // Serialize behind an in-flight save: both payloads reflect the same pending edits
-    await saveInFlightRef.current
-    if (!doc || !filePath) return
-    const target = await window.pdfApi.pickSavePath(fileName)
-    if (!target || target === filePath) return
-    const result = await window.pdfApi.save({
-      path: filePath,
-      targetPath: target,
-      ...editsPayload(),
+  const saveAs = (): Promise<boolean> => {
+    if (closePromptActiveRef.current) return Promise.resolve(true)
+    if (saveAsInFlightRef.current) return saveAsInFlightRef.current
+    const priorSave = saveInFlightRef.current
+    const run = (async () => {
+      // A callback created before the save completes holds its old edit payload. Refuse rather
+      // than apply it again; a fresh invocation after reconciliation sees the current document.
+      if (priorSave) {
+        if (await priorSave) {
+          opFailed('Save finished. Please retry Save As.')
+        } else {
+          const retry = 'Please retry Save As after resolving the Save error.'
+          setSaveError((error) => `${error} ${retry}`)
+          setOrganizeError((error) => `${error} ${retry}`)
+        }
+        return true
+      }
+      if (
+        editProducersRef.current ||
+        directOperationRef.current ||
+        externalRefreshRef.current ||
+        draftPages.size
+      ) {
+        opFailed('An edit or file operation is still in progress. Please retry Save As.')
+        return true
+      }
+      if (pendingReconcileRef.current) {
+        await reconcileWritten()
+        return true
+      }
+      if (!doc || !filePath) return false
+      setSaveState('saving')
+      window.pdfApi.setDirty(true)
+      try {
+        const target = await window.pdfApi.pickSavePath(fileName)
+        if (!target || target === filePath) return false
+        setSaveState('saving')
+        const result = await window.pdfApi.save({
+          path: filePath,
+          targetPath: target,
+          ...editsPayload(),
+        })
+        if (!result.ok) {
+          opFailed(result.error, 'save')
+          return true
+        }
+        savedOnceRef.current = true
+        setFilePath(target)
+        pendingReconcileRef.current = { path: target, warning: result.warning }
+        setPendingReconcile(true)
+        const reconciled = await reconcileWritten()
+        return !reconciled || Boolean(result.warning)
+      } catch (err) {
+        opFailed(err instanceof Error ? err.message : String(err), 'save')
+        return true
+      } finally {
+        window.pdfApi.setDirty(dirtyRef.current || pendingReconcileRef.current !== null)
+        setSaveState((current) => (current === 'saving' ? 'idle' : current))
+      }
+    })()
+    const tracked = run.finally(() => {
+      if (saveAsInFlightRef.current === tracked) saveAsInFlightRef.current = null
     })
-    if (!result.ok) {
-      opFailed(result.error)
-      return
-    }
-    setFilePath(target)
-    // Reload from the copy: overlays/pending ops are cleared and the grant covers the new path
-    try {
-      const el = scrollRef.current
-      const scrollTop = el?.scrollTop ?? 0
-      await loadDoc(target, doc)
-      requestAnimationFrame(() => {
-        if (scrollRef.current) scrollRef.current.scrollTop = scrollTop
-      })
-    } catch {
-      /* Save already succeeded; a reload failure doesn't block (takes effect on next open) */
-    }
-    setSaveState('saved')
-    setTimeout(() => setSaveState((s) => (s === 'saved' ? 'idle' : s)), 2000)
+    saveAsInFlightRef.current = tracked
+    return tracked
   }
 
   // Autosave (same strategy as Docs): every 30s and on window blur, silently persist pending
@@ -2046,13 +2319,34 @@ export default function App() {
   // overwritten because a thumbnail got dragged or a markup tool tapped — Save (⌘S / the
   // toolbar button / File ▸ Save) is what opts this file into unattended writes.
   useAutosave(
-    () => savedOnceRef.current && dirty && saveState !== 'saving' && filePath !== '' && !readOnly,
+    () =>
+      isAutosaveAllowed({
+        enabled: autosaveEnabled,
+        savedOnce: savedOnceRef.current,
+        dirty,
+        saving:
+          saveState === 'saving' ||
+          saveInFlightRef.current !== null ||
+          saveAsInFlightRef.current !== null,
+        hasPath: filePath !== '',
+        readOnly,
+        pendingDecision: pendingOpenRef.current !== null,
+        closeGuardActive: closePromptActiveRef.current,
+      }),
     () => void save(true),
   )
 
   /** Reload from disk: the same re-read the watcher does, on demand (external rebuilds). */
   const reloadFromDisk = () => {
-    if (!doc || dirty || saveState === 'saving') return
+    if (
+      !doc ||
+      dirty ||
+      saveState === 'saving' ||
+      pendingReconcileRef.current ||
+      directOperationRef.current ||
+      editProducersRef.current
+    )
+      return
     void reloadDoc().catch(() => {})
   }
 
@@ -2063,7 +2357,15 @@ export default function App() {
     () =>
       window.pdfApi.onFileChanged((p) => {
         if (p !== filePath || dirtyRef.current) return
-        if (saveInFlightRef.current || passwordRef.current !== undefined) return
+        if (
+          saveInFlightRef.current ||
+          saveAsInFlightRef.current ||
+          pendingReconcileRef.current ||
+          directOperationRef.current ||
+          editProducersRef.current ||
+          passwordRef.current !== undefined
+        )
+          return
         if (Date.now() - lastSaveAtRef.current < 1500) return
         void reloadDoc().catch(() => {})
       }),
@@ -2185,13 +2487,40 @@ export default function App() {
     return byPage
   }, [stampCfg, visList, rows, visibleRowSet, renderStamps])
 
+  /** Live guards cover prompt changes that don't trigger a render. Pending page ops are
+   *  intentionally excluded: visible-page reorder can coexist with pending deletion/reorder. */
+  const pageMoveBlocked = (): boolean =>
+    readOnly ||
+    saveState === 'saving' ||
+    closePromptActiveRef.current ||
+    saveInFlightRef.current !== null ||
+    saveAsInFlightRef.current !== null ||
+    pendingReconcileRef.current !== null ||
+    directOperationRef.current ||
+    externalRefreshRef.current ||
+    editProducersRef.current > 0 ||
+    draftPages.size > 0 ||
+    pageWriteBusyRef.current
+
   /** Thumbnail drag-and-drop reorder: move the page at position from to position to */
   const movePage = (from: number, to: number) => {
-    if (from === to || readOnly) return
+    if (
+      pageMoveBlocked() ||
+      !Number.isInteger(from) ||
+      !Number.isInteger(to) ||
+      from === to ||
+      from < 0 ||
+      to < 0 ||
+      from >= visList.length ||
+      to >= visList.length ||
+      visList[from] === undefined
+    )
+      return
     pushUndo()
     const next = [...visList]
     const [moved] = next.splice(from, 1)
-    next.splice(to, 0, moved!)
+    if (moved === undefined) return
+    next.splice(to, 0, moved)
     // order must cover all original pages (deleted ones included, kept at the tail so they don't affect the result)
     const rest = sizes.map((_, i) => i).filter((i) => !next.includes(i))
     setOrder([...next, ...rest])
@@ -2417,20 +2746,68 @@ export default function App() {
 
   /** Extract/insert work on the file on disk — flush unsaved changes first */
   const flushThen = async (fn: () => Promise<void>) => {
+    if (closePromptActiveRef.current) return
+    if (pendingReconcileRef.current) {
+      if (await save()) opFailed('Refresh completed. Please retry the requested operation.')
+      return
+    }
+    if (
+      saveInFlightRef.current ||
+      saveAsInFlightRef.current ||
+      directOperationRef.current ||
+      editProducersRef.current ||
+      externalRefreshRef.current ||
+      draftPages.size
+    ) {
+      opFailed('An edit or file operation is still in progress. Please retry.')
+      return
+    }
     if (dirty && !(await save())) return
-    await fn()
+    if (closePromptActiveRef.current) return
+    if (
+      saveInFlightRef.current ||
+      saveAsInFlightRef.current ||
+      pendingReconcileRef.current ||
+      directOperationRef.current ||
+      editProducersRef.current ||
+      externalRefreshRef.current
+    ) {
+      opFailed('An edit or file operation is still in progress. Please retry.')
+      return
+    }
+    directOperationRef.current = true
+    setDirectBusy(true)
+    setSaveState('saving')
+    window.pdfApi.setDirty(true)
+    try {
+      await trackSaveInFlight(directInFlightRef, fn)
+    } finally {
+      directOperationRef.current = false
+      setDirectBusy(false)
+      window.pdfApi.setDirty(dirtyRef.current || pendingReconcileRef.current !== null)
+      setSaveState((current) => (current === 'saving' ? 'idle' : current))
+    }
   }
 
-  const extractPage = (origIdx: number) =>
-    flushThen(async () => {
+  const refreshAfterDirectWrite = async () => {
+    pendingReconcileRef.current = { path: filePath }
+    setPendingReconcile(true)
+    return reconcileWritten()
+  }
+
+  const extractPage = (origIdx: number) => {
+    const pageIndex = visList.indexOf(origIdx)
+    if (pageIndex < 0) return Promise.resolve()
+    return flushThen(async () => {
       const base = fileName.replace(/\.pdf$/i, '')
       const result = await window.pdfApi.extractPages({
         path: filePath,
-        pages: [origIdx],
-        suggestedName: `${base}-p${origIdx + 1}.pdf`,
+        pages: [pageIndex],
+        suggestedName: `${base}-p${pageIndex + 1}.pdf`,
       })
       if (!result.ok) opFailed(result.error)
     })
+  }
 
   const openExtractDlg = () => {
     setExtractInput(String(currentPage))
@@ -2438,7 +2815,7 @@ export default function App() {
     setExtractDlg(true)
   }
 
-  /** Extract dialog confirm: visible page-number ranges → original page indices */
+  /** Extract dialog confirm: visible page numbers become disk indices after the flush. */
   const confirmExtract = () => {
     const pages = parsePageRanges(extractInput, pageCount)
     if (!pages) {
@@ -2451,22 +2828,25 @@ export default function App() {
       const label = pages.length === 1 ? `p${pages[0]}` : `p${pages[0]}-${pages[pages.length - 1]}`
       const result = await window.pdfApi.extractPages({
         path: filePath,
-        pages: pages.map((n) => visList[n - 1]!),
+        pages: pages.map((n) => n - 1),
         suggestedName: `${base}-${label}.pdf`,
       })
       if (!result.ok) opFailed(result.error)
     })
   }
 
-  const insertPdf = (afterOrigIdx: number) =>
-    flushThen(async () => {
-      const result = await window.pdfApi.insertPdf({ path: filePath, afterPageIndex: afterOrigIdx })
+  const insertPdf = (afterOrigIdx: number) => {
+    const afterPageIndex = afterOrigIdx === -1 ? -1 : visList.indexOf(afterOrigIdx)
+    if (afterOrigIdx !== -1 && afterPageIndex < 0) return Promise.resolve()
+    return flushThen(async () => {
+      const result = await window.pdfApi.insertPdf({ path: filePath, afterPageIndex })
       if (!result.ok) {
         opFailed(result.error)
         return
       }
-      if (!('canceled' in result)) await loadDoc(filePath, doc)
+      if (!('canceled' in result)) await refreshAfterDirectWrite()
     })
+  }
 
   /**
    * Insert a blank page after origIdx (-1 = at the front). The page is written in the main
@@ -2489,7 +2869,7 @@ export default function App() {
       // The reload renumbers pages: a stale grid selection would point at the wrong cards
       setOrganizeSelected(new Set())
       setOrganizeError('')
-      await reloadDoc()
+      await refreshAfterDirectWrite()
     }).finally(() => {
       pageWriteBusyRef.current = false
       setPageWriteBusy(false)
@@ -2512,7 +2892,7 @@ export default function App() {
       }
       setOrganizeSelected(new Set())
       setOrganizeError('')
-      await reloadDoc()
+      await refreshAfterDirectWrite()
     }).finally(() => {
       pageWriteBusyRef.current = false
       setPageWriteBusy(false)
@@ -2540,6 +2920,7 @@ export default function App() {
     pageCount: () => sizes.length,
     currentPage: () => (visList[currentPage - 1] ?? 0) + 1,
     readOnly: () => readOnly,
+    beginEdit,
     outline: () => outline,
     searchIndex: getSearchIndex,
     isDeleted: (i) => deleted.has(i),
@@ -2549,50 +2930,54 @@ export default function App() {
       scrollToPage(visIdx + 1)
       return true
     },
-    addMarkup: (type, origIdx, rects) => {
-      pushUndo()
-      const quads = rects.map((r) => [r[0], r[3], r[2], r[3], r[0], r[1], r[2], r[1]])
-      setMarkups((prev) => [
-        ...prev,
-        {
-          id: `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
-          pageIndex: origIdx,
-          type,
-          color: MARKUP_COLORS[type],
-          quads,
-        },
-      ])
-    },
+    addMarkup: (type, origIdx, rects) =>
+      flushSync(() => {
+        pushUndo()
+        const quads = rects.map((r) => [r[0], r[3], r[2], r[3], r[0], r[1], r[2], r[1]])
+        setMarkups((prev) => [
+          ...prev,
+          {
+            id: `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+            pageIndex: origIdx,
+            type,
+            color: MARKUP_COLORS[type],
+            quads,
+          },
+        ])
+      }),
     formEdits: () => formEdits,
-    applyFormEdit: (v) => {
-      pushUndo()
-      setFormEdits((prev) => new Map(prev).set(v.name, v))
-    },
-    rotatePage,
+    applyFormEdit: (v) =>
+      flushSync(() => {
+        pushUndo()
+        setFormEdits((prev) => new Map(prev).set(v.name, v))
+      }),
+    rotatePage: (idx, dir) => flushSync(() => rotatePage(idx, dir)),
     deletePage: (origIdx) => {
       if (pageCount <= 1 || readOnly) return false
-      deletePage(origIdx)
+      flushSync(() => deletePage(origIdx))
       return true
     },
     pageGeom,
-    applyContentEdit: commitContentEdit,
-    addNote: (origIdx, contents, at) => {
-      pushUndo()
-      // A note sits at its anchor; without one it lands at the page's top-right corner
-      const geom = pageGeom(origIdx)
-      const pos: [number, number] = at ?? [geom.pw - 48, geom.ph - 48]
-      setDrawings((prev) => [
-        ...prev,
-        {
-          id: newId(),
-          input: { kind: 'note', pageIndex: origIdx, color: drawColor, at: pos, contents },
-        },
-      ])
-    },
-    setDocumentMetadata: (meta) => {
-      pushUndo()
-      setMetadata((prev) => ({ ...(prev ?? {}), ...meta }))
-    },
+    applyContentEdit: (edit) => flushSync(() => commitContentEdit(edit)),
+    addNote: (origIdx, contents, at) =>
+      flushSync(() => {
+        pushUndo()
+        // A note sits at its anchor; without one it lands at the page's top-right corner
+        const geom = pageGeom(origIdx)
+        const pos: [number, number] = at ?? [geom.pw - 48, geom.ph - 48]
+        setDrawings((prev) => [
+          ...prev,
+          {
+            id: newId(),
+            input: { kind: 'note', pageIndex: origIdx, color: drawColor, at: pos, contents },
+          },
+        ])
+      }),
+    setDocumentMetadata: (meta) =>
+      flushSync(() => {
+        pushUndo()
+        setMetadata((prev) => ({ ...(prev ?? {}), ...meta }))
+      }),
     writeOutline: async (nodes) => {
       // The flush below writes the pending page deletes/reorder, and that renumbers the file:
       // rebase the bookmarks onto the numbering the saved file will have before writing them.
@@ -2609,9 +2994,13 @@ export default function App() {
             result = { ok: false, error: r.error }
             return
           }
-          // reloadDoc, not loadDoc: it refreshes the save timestamp (no watcher echo reload) and
-          // keeps the reader's scroll position across the re-read
-          await reloadDoc()
+          if (!(await refreshAfterDirectWrite())) {
+            result = {
+              ok: false,
+              error: 'The outline was written, but refreshing failed. Retry refresh.',
+            }
+            return
+          }
           result = { ok: true }
         })
       } catch (err) {
@@ -2740,7 +3129,7 @@ export default function App() {
         }
         // The file changed on disk: reload like sanitize does, then re-run the report in place so
         // the dialog's own rows flip to pass
-        await loadDoc(filePath, doc)
+        if (!(await refreshAfterDirectWrite())) return
         const fresh = await window.pdfApi.a11yCheck({ path: filePath })
         if (fresh.ok) setA11yReport(fresh.report)
       } catch (err) {
@@ -2817,7 +3206,7 @@ export default function App() {
           setCommentsKey((k) => k + 1)
           return
         }
-        await loadDoc(filePath, doc)
+        if (!(await refreshAfterDirectWrite())) return
         setCommentsKey((k) => k + 1)
       } catch (err) {
         opFailed(err instanceof Error ? err.message : String(err))
@@ -2905,7 +3294,7 @@ export default function App() {
           return
         }
         endOutlineEdit()
-        await loadDoc(filePath, doc)
+        await refreshAfterDirectWrite()
       } catch (err) {
         opFailed(err instanceof Error ? err.message : String(err))
       } finally {
@@ -2918,6 +3307,11 @@ export default function App() {
   /** Insert a bitmap (ribbon picker or clipboard) as a drawing centered on the current page */
   const addImageFile = async (file: File) => {
     if (readOnly || curOrigIdx < 0) return
+    const release = beginEdit()
+    if (!release) {
+      reportBlockedEdit('A file operation is in progress. Please retry adding the image.')
+      return
+    }
     try {
       const png = await imageFileToPng(file)
       const geom = pageGeom(curOrigIdx)
@@ -2931,16 +3325,20 @@ export default function App() {
         width,
         height,
       })
-      pushUndo()
-      const id = newId()
-      setDrawings((prev) => [
-        ...prev,
-        { id, input: { kind: 'image', pageIndex: curOrigIdx, image: png.image, rect } },
-      ])
-      setSelected(null)
-      setEditMode(false)
+      flushSync(() => {
+        pushUndo()
+        const id = newId()
+        setDrawings((prev) => [
+          ...prev,
+          { id, input: { kind: 'image', pageIndex: curOrigIdx, image: png.image, rect } },
+        ])
+        setSelected(null)
+        setEditMode(false)
+      })
     } catch (err) {
       opFailed(err instanceof Error ? err.message : String(err))
+    } finally {
+      release()
     }
   }
 
@@ -2989,10 +3387,31 @@ export default function App() {
     return () => window.removeEventListener('pointerdown', close)
   }, [colorOpen])
 
+  // Pause unattended writes before the native close dialog opens, and let main wait out a write
+  // that began before the prompt. This prevents blur/timer saves after a discard decision.
+  useEffect(
+    () =>
+      window.pdfApi.onClosePromptChanged((active, discardAutosave) => {
+        closePromptActiveRef.current = active
+        if (!active && discardAutosave) savedOnceRef.current = false
+        if (active) {
+          void waitForSavesBeforeClosePrompt([
+            saveInFlightRef.current,
+            saveAsInFlightRef.current,
+            directInFlightRef.current,
+            editProducersRef.current
+              ? new Promise<void>((resolve) => editIdleWaitersRef.current.push(resolve))
+              : null,
+          ]).then(() => window.pdfApi.sendClosePromptReady())
+        }
+      }),
+    [],
+  )
+
   // Main process picked "Save" in the close prompt → save and report the result
   useEffect(() => {
     return window.pdfApi.onCloseSaveRequest(() => {
-      void save().then((ok) => window.pdfApi.sendCloseSaveResult(ok))
+      void save(false, true).then((ok) => window.pdfApi.sendCloseSaveResult(ok))
     })
   })
 
@@ -3485,7 +3904,17 @@ export default function App() {
   ]
 
   return (
-    <div className={`app${readMode ? ' read-mode' : ''}`}>
+    <div
+      className={`app${readMode ? ' read-mode' : ''}`}
+      aria-busy={isReaderInteractionLocked(
+        saveState,
+        pendingReconcile || directBusy || externalRefreshBusy,
+      )}
+      inert={isReaderInteractionLocked(
+        saveState,
+        pendingReconcile || directBusy || externalRefreshBusy,
+      )}
+    >
       {/* Behind the ribbon's Add image buttons (Home and Comment), and reset after each read */}
       <input
         ref={imageInputRef}
@@ -5092,7 +5521,13 @@ export default function App() {
                               editMode={editMode}
                               edits={pageEdits.filter((e) => e.pageIndex === origIdx)}
                               readOnly={readOnly || readMode}
-                              onCommit={commitContentEdit}
+                              onCommit={(edit) => flushSync(() => commitContentEdit(edit))}
+                              beginEdit={() => beginEdit(doc)}
+                              onEditBlocked={() =>
+                                reportBlockedEdit(
+                                  'The document changed or is busy. Please retry the image edit.',
+                                )
+                              }
                               onDraftActivity={onDraftActivity}
                             />
                           )}
@@ -5323,7 +5758,10 @@ export default function App() {
               />
             )}
             {notePrompt && (
-              <DraggableModal onMaskClick={() => setNotePrompt(null)}>
+              <DraggableModal
+                ariaLabel={notePrompt.kind === 'freetext' ? t('drawFreeText') : t('noteTitle')}
+                onMaskClick={() => setNotePrompt(null)}
+              >
                 <div className="pdf-modal-title">
                   {notePrompt.kind === 'freetext' ? t('drawFreeText') : t('noteTitle')}
                 </div>
@@ -5358,47 +5796,61 @@ export default function App() {
               </DraggableModal>
             )}
             {outlinePrompt && (
-              <DraggableModal onMaskClick={() => setOutlinePrompt(null)}>
-                <div className="pdf-modal-title">
-                  {t(
-                    outlinePrompt.mode === 'rename'
-                      ? 'outlineRename'
-                      : outlinePrompt.mode === 'add'
-                        ? 'outlineAdd'
-                        : 'outlineAddChild',
-                  )}
-                </div>
-                <input
-                  className="pdf-modal-input"
-                  value={outlinePrompt.text}
-                  autoFocus
-                  onChange={(e) => setOutlinePrompt({ ...outlinePrompt, text: e.target.value })}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') confirmOutlinePrompt()
-                    else if (e.key === 'Escape') setOutlinePrompt(null)
+              <DraggableModal
+                ariaLabel={t(
+                  outlinePrompt.mode === 'rename'
+                    ? 'outlineRename'
+                    : outlinePrompt.mode === 'add'
+                      ? 'outlineAdd'
+                      : 'outlineAddChild',
+                )}
+                onMaskClick={() => setOutlinePrompt(null)}
+              >
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    confirmOutlinePrompt()
                   }}
-                />
-                <div className="pdf-modal-actions">
-                  <button
-                    type="button"
-                    className="pdf-modal-btn"
-                    onClick={() => setOutlinePrompt(null)}
-                  >
-                    {t('cancel')}
-                  </button>
-                  <button
-                    type="button"
-                    className="pdf-modal-btn primary"
-                    disabled={!outlinePrompt.text.trim()}
-                    onClick={confirmOutlinePrompt}
-                  >
-                    {t('ok')}
-                  </button>
-                </div>
+                >
+                  <div className="pdf-modal-title">
+                    {t(
+                      outlinePrompt.mode === 'rename'
+                        ? 'outlineRename'
+                        : outlinePrompt.mode === 'add'
+                          ? 'outlineAdd'
+                          : 'outlineAddChild',
+                    )}
+                  </div>
+                  <input
+                    className="pdf-modal-input"
+                    value={outlinePrompt.text}
+                    autoFocus
+                    onChange={(e) => setOutlinePrompt({ ...outlinePrompt, text: e.target.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') setOutlinePrompt(null)
+                    }}
+                  />
+                  <div className="pdf-modal-actions">
+                    <button
+                      type="button"
+                      className="pdf-modal-btn"
+                      onClick={() => setOutlinePrompt(null)}
+                    >
+                      {t('cancel')}
+                    </button>
+                    <button
+                      type="submit"
+                      className="pdf-modal-btn primary"
+                      disabled={!outlinePrompt.text.trim()}
+                    >
+                      {t('ok')}
+                    </button>
+                  </div>
+                </form>
               </DraggableModal>
             )}
             {a11yDlg && a11yReport && (
-              <DraggableModal onMaskClick={() => setA11yDlg(false)}>
+              <DraggableModal ariaLabel={t('a11yTitle')} onMaskClick={() => setA11yDlg(false)}>
                 <div className="pdf-modal-title">{t('a11yTitle')}</div>
                 <div className="pdf-modal-hint">
                   {t('totalPagesN', { n: a11yReport.pageCount })}
@@ -5448,7 +5900,7 @@ export default function App() {
               </DraggableModal>
             )}
             {splitDlg && (
-              <DraggableModal onMaskClick={() => setSplitDlg(false)}>
+              <DraggableModal ariaLabel={t('splitPdf')} onMaskClick={() => setSplitDlg(false)}>
                 <div className="pdf-modal-title">{t('splitPdf')}</div>
                 <div className="pdf-modal-choices">
                   {(['every', 'at', 'bookmark'] as const).map((m) => (
@@ -5526,7 +5978,10 @@ export default function App() {
               </DraggableModal>
             )}
             {sanitizeDlg && (
-              <DraggableModal onMaskClick={() => setSanitizeDlg(false)}>
+              <DraggableModal
+                ariaLabel={t('sanitizeTitle')}
+                onMaskClick={() => setSanitizeDlg(false)}
+              >
                 <div className="pdf-modal-title">{t('sanitizeTitle')}</div>
                 {sanitizeReport ? (
                   <>
@@ -5594,7 +6049,10 @@ export default function App() {
               </DraggableModal>
             )}
             {extractDlg && (
-              <DraggableModal onMaskClick={() => setExtractDlg(false)}>
+              <DraggableModal
+                ariaLabel={t('extractRangeTitle')}
+                onMaskClick={() => setExtractDlg(false)}
+              >
                 <div className="pdf-modal-title">{t('extractRangeTitle')}</div>
                 <input
                   className={`pdf-modal-input${extractInvalid ? ' invalid' : ''}`}
@@ -5628,7 +6086,7 @@ export default function App() {
               <DraggableModal
                 role="dialog"
                 ariaLabel={t('openDirtyTitle')}
-                onMaskClick={() => setPendingOpen(null)}
+                onMaskClick={cancelPendingOpen}
               >
                 <div className="pdf-modal-title">{t('openDirtyTitle')}</div>
                 <div className="pdf-modal-hint">{t('openDirtyDetail')}</div>
@@ -5636,6 +6094,7 @@ export default function App() {
                   <button
                     type="button"
                     className="pdf-modal-btn"
+                    disabled={saveState === 'saving'}
                     onClick={() => void confirmOpen('discard')}
                   >
                     {t('discard')}
@@ -5643,7 +6102,8 @@ export default function App() {
                   <button
                     type="button"
                     className="pdf-modal-btn"
-                    onClick={() => setPendingOpen(null)}
+                    disabled={saveState === 'saving'}
+                    onClick={cancelPendingOpen}
                   >
                     {t('cancel')}
                   </button>
@@ -5738,17 +6198,59 @@ export default function App() {
           {readOnly && <span className="tb-readonly">{t('roEncrypted')}</span>}
           {saveState === 'saving' ? (
             <span className="tb-save-pending">{t('saving')}</span>
-          ) : dirty && saveState !== 'error' ? (
+          ) : dirty && (saveState !== 'error' || saveErrorKind === 'operation') ? (
             <span className="tb-save-pending">{t('unsaved')}</span>
           ) : null}
           {saveState === 'error' && (
-            <span className="tb-save-error" title={saveError}>
-              {t('saveFailed')}
+            <span
+              className={saveErrorKind === 'save' ? 'tb-save-error' : 'tb-operation-error'}
+              title={saveError}
+            >
+              {saveErrorKind === 'save' ? t('saveFailed') : saveError}
             </span>
           )}
           {saveState === 'saved' && <span className="tb-save-ok">{t('savedOk')}</span>}
         </div>
       </footer>
+      {saveState === 'error' && status === 'ready' && !organizeOpen && (
+        <div
+          className="reader-error-alert"
+          role="alert"
+          style={{
+            position: 'fixed',
+            zIndex: 45,
+            left: '50%',
+            bottom: 34,
+            transform: 'translateX(-50%)',
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            gap: 8,
+            maxWidth: 'calc(100vw - 32px)',
+            padding: '8px 12px',
+            borderRadius: 8,
+            fontFamily: 'var(--font-sans)',
+            fontSize: 12,
+            fontWeight: 500,
+            boxShadow: 'var(--popup-shadow)',
+          }}
+        >
+          <span style={{ overflowWrap: 'anywhere' }}>
+            {saveErrorKind === 'save' ? `${t('saveFailed')}: ` : ''}
+            {saveError}
+          </span>
+          {saveErrorKind === 'save' && dirty && (
+            <>
+              <button type="button" className="pdf-modal-btn" onClick={() => void save()}>
+                {t('save')}
+              </button>
+              <button type="button" className="pdf-modal-btn" onClick={() => void saveAs()}>
+                Save As…
+              </button>
+            </>
+          )}
+        </div>
+      )}
       {showPrintPreview && doc && (
         <PdfPrintPreview
           doc={doc}
@@ -5774,9 +6276,13 @@ export default function App() {
           onDelete={deletePages}
           onInsertBlank={insertBlankPage}
           onDuplicate={duplicatePages}
+          onMovePage={(from, to) => {
+            if (!pageMoveBlocked()) movePage(from, to)
+          }}
           readOnly={readOnly}
           t={t}
           actionsDisabled={pageWriteBlocked}
+          moveDisabled={pageMoveBlocked() || editProducerCount > 0}
           currentOrigIdx={curOrigIdx}
           error={organizeError}
         />
@@ -5790,6 +6296,24 @@ export default function App() {
         }}
         onClose={() => setPaletteOpen(false)}
       />
+      {pendingReconcile &&
+        saveState !== 'saving' &&
+        createPortal(
+          <div className="reader-recovery" role="alert">
+            <p>{saveError}</p>
+            <button type="button" className="pdf-modal-btn" autoFocus onClick={() => void save()}>
+              Retry refresh
+            </button>
+          </div>,
+          document.body,
+        )}
+      {isReaderInteractionLocked(saveState) &&
+        createPortal(
+          <div className="reader-save-live" role="status" aria-live="polite">
+            {t('saving')}
+          </div>,
+          document.body,
+        )}
     </div>
   )
 }

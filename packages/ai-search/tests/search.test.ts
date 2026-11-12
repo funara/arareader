@@ -1,4 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { safeFetch } from '../src/safe-fetch'
+
+vi.mock('../src/safe-fetch', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/safe-fetch')>()
+  return { ...original, safeFetch: vi.fn(original.safeFetch) }
+})
+
+function response(body: string, headers?: Record<string, string>) {
+  return Object.assign(new Response(body, { headers }), { discard() {} })
+}
 import {
   decodeHtmlEntities,
   parseBingResults,
@@ -11,14 +21,8 @@ import {
 } from '../src/index'
 
 describe('Pure HTTP webSearch', () => {
-  const originalFetch = globalThis.fetch
-
   beforeEach(() => {
-    vi.restoreAllMocks()
-  })
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch
+    vi.mocked(safeFetch).mockReset()
   })
 
   it('decodes HTML entities properly', () => {
@@ -92,12 +96,9 @@ describe('Pure HTTP webSearch', () => {
     const directParsed = parseBingResults(mockHtml, 5)
     expect(directParsed).toHaveLength(1)
     expect(directParsed[0].title).toBe('DeepSeek | Into the Unknown')
-    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+    vi.mocked(safeFetch).mockImplementation(async (url: string) => {
       if (String(url).includes('bing.com')) {
-        return {
-          ok: true,
-          text: async () => mockHtml,
-        }
+        return response(mockHtml)
       }
       throw new Error('Not Bing')
     })
@@ -114,17 +115,16 @@ describe('Pure HTTP webSearch', () => {
   })
 
   it('falls back gracefully to Wikipedia API when search engines fail', async () => {
-    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+    vi.mocked(safeFetch).mockImplementation(async (url: string) => {
       if (String(url).includes('wikipedia.org')) {
-        return {
-          ok: true,
-          json: async () => [
+        return response(
+          JSON.stringify([
             'ARAOffice',
             ['ARAOffice'],
             ['AI-native office suite'],
             ['https://en.wikipedia.org/wiki/ARAOffice'],
-          ],
-        }
+          ]),
+        )
       }
       throw new Error('Search engine offline')
     })
@@ -137,7 +137,7 @@ describe('Pure HTTP webSearch', () => {
   })
 
   it('returns empty results on complete network failure without throwing', async () => {
-    globalThis.fetch = vi.fn().mockRejectedValue(new Error('Offline'))
+    vi.mocked(safeFetch).mockRejectedValue(new Error('Offline'))
 
     const res = await webSearch('test query')
     expect(res.method).toBe('web-search')
@@ -146,14 +146,8 @@ describe('Pure HTTP webSearch', () => {
 })
 
 describe('Pure HTTP webExtract', () => {
-  const originalFetch = globalThis.fetch
-
   beforeEach(() => {
-    vi.restoreAllMocks()
-  })
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch
+    vi.mocked(safeFetch).mockReset()
   })
 
   it.each([
@@ -164,6 +158,8 @@ describe('Pure HTTP webExtract', () => {
     'http://172.16.0.1/internal',
     'ftp://example.com/file',
   ])('rejects unsafe URL %s', async (url) => {
+    const actual = await vi.importActual<typeof import('../src/safe-fetch')>('../src/safe-fetch')
+    vi.mocked(safeFetch).mockImplementation(actual.safeFetch)
     const res = await webExtract(url)
     expect(res.content).toBeUndefined()
     expect(res.excerpt).toBeDefined()
@@ -186,11 +182,7 @@ describe('Pure HTTP webExtract', () => {
         </body>
       </html>
     `
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      headers: new Headers({ 'content-type': 'text/html' }),
-      text: async () => mockHtml,
-    })
+    vi.mocked(safeFetch).mockResolvedValue(response(mockHtml, { 'content-type': 'text/html' }))
 
     const res = await webExtract('https://example.com/page', 500)
     expect(res.title).toBe('Example Domain & Page')

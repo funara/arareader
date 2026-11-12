@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import type { FormEvent, ReactElement } from 'react'
 import type { AiProviderId, AiSettings } from '@arareader/ai-provider'
 import {
@@ -11,7 +11,11 @@ import {
 interface OnboardingModalProps {
   initialDisplayName?: string
   initialFullName?: string
-  onSave: (displayName: string, fullName: string, useAsDefaultAuthor: boolean) => void
+  onSave: (
+    displayName: string,
+    fullName: string,
+    useAsDefaultAuthor: boolean,
+  ) => void | Promise<void>
   onSkip: () => void
 }
 
@@ -85,6 +89,8 @@ export function OnboardingModal({
   const [customKey, setCustomKey] = useState('')
   const [customModel, setCustomModel] = useState(DEFAULT_CUSTOM_MODEL)
   const [showKey, setShowKey] = useState(false)
+  const [aiAutoSuggestions, setAiAutoSuggestions] = useState(false)
+  const aiAutoSuggestionsTouchedRef = useRef(false)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
 
@@ -111,6 +117,15 @@ export function OnboardingModal({
         })
         .catch(() => {})
     }
+    void window.reader
+      .getPreferences()
+      .then((prefs) => {
+        if (!active || aiAutoSuggestionsTouchedRef.current) return
+        if (prefs.aiAutoSuggestionsConsentVersion === 1) {
+          setAiAutoSuggestions(prefs.aiAutoSuggestions === true)
+        }
+      })
+      .catch(() => {})
     return () => {
       active = false
     }
@@ -140,6 +155,7 @@ export function OnboardingModal({
   }
 
   const handleFinish = async (skipAi = false) => {
+    if (saving) return
     setError('')
     const dn = displayName.trim() || fullName.trim() || 'ARAReader'
     const fn = fullName.trim() || dn || 'ARAReader'
@@ -150,42 +166,60 @@ export function OnboardingModal({
     }
 
     setSaving(true)
-
-    if (!skipAi && window.readerAi?.setSettings) {
-      try {
-        const stored = (await window.readerAi.getSettings().catch(() => null)) as AiSettings | null
-        const baseUrl = endpoint.trim().replace(/\/+$/, '')
-        const nextAi: AiSettings = {
-          provider: choice,
-          providers: {
-            google:
-              choice === 'google'
-                ? {
-                    model: googleModel.trim() || DEFAULT_GOOGLE_MODEL,
-                    apiKey: googleKey.trim() || stored?.providers?.google?.apiKey || '',
-                  }
-                : (stored?.providers?.google ?? { model: DEFAULT_GOOGLE_MODEL, apiKey: '' }),
-            custom:
-              choice === 'custom' && baseUrl
-                ? {
-                    model: customModel.trim() || DEFAULT_CUSTOM_MODEL,
-                    baseUrl,
-                    apiKey: customKey.trim() || stored?.providers?.custom?.apiKey || '',
-                  }
-                : (stored?.providers?.custom ?? {
-                    model: DEFAULT_CUSTOM_MODEL,
-                    baseUrl: '',
-                    apiKey: '',
-                  }),
-          },
+    try {
+      if (!skipAi) {
+        if (window.readerAi?.setSettings) {
+          const stored = (await window.readerAi
+            .getSettings()
+            .catch(() => null)) as AiSettings | null
+          const baseUrl = endpoint.trim().replace(/\/+$/, '')
+          const nextAi: AiSettings = {
+            provider: choice,
+            providers: {
+              google:
+                choice === 'google'
+                  ? {
+                      model: googleModel.trim() || DEFAULT_GOOGLE_MODEL,
+                      apiKey: googleKey.trim() || stored?.providers?.google?.apiKey || '',
+                    }
+                  : (stored?.providers?.google ?? { model: DEFAULT_GOOGLE_MODEL, apiKey: '' }),
+              custom:
+                choice === 'custom' && baseUrl
+                  ? {
+                      model: customModel.trim() || DEFAULT_CUSTOM_MODEL,
+                      baseUrl,
+                      apiKey: customKey.trim() || stored?.providers?.custom?.apiKey || '',
+                    }
+                  : (stored?.providers?.custom ?? {
+                      model: DEFAULT_CUSTOM_MODEL,
+                      baseUrl: '',
+                      apiKey: '',
+                    }),
+            },
+          }
+          await window.readerAi.setSettings(nextAi)
         }
-        await window.readerAi.setSettings(nextAi)
-      } catch (err) {
-        console.warn('Failed to save AI settings in onboarding:', err)
+        const prefs = await window.reader.getPreferences()
+        const aiChoice = aiAutoSuggestionsTouchedRef.current
+          ? aiAutoSuggestions
+          : prefs.aiAutoSuggestionsConsentVersion === 1
+            ? prefs.aiAutoSuggestions === true
+            : aiAutoSuggestions
+        await window.reader.setPreferences({
+          ...prefs,
+          aiAutoSuggestions: aiChoice,
+          aiAutoSuggestionsConsentVersion: 1,
+          aiAutoSuggestionsConsentAction: true,
+        })
       }
+      await onSave(dn, fn, useDefaultAuthor)
+    } catch {
+      setError(
+        'Could not save setup. Your entries are still here; try again or choose “Skip for now.”',
+      )
+    } finally {
+      setSaving(false)
     }
-
-    onSave(dn, fn, useDefaultAuthor)
   }
 
   const handleStep2Submit = (e: FormEvent) => {
@@ -231,8 +265,8 @@ export function OnboardingModal({
             <>
               <h3 className="onboard-title">Configure your AI Copilot (Optional)</h3>
               <p className="onboard-subtitle">
-                Connect your AI model for document analysis, summarization, and chat. ARAReader uses
-                direct BYO-key connections with zero telemetry.
+                Connect an AI provider for document analysis and chat. Requests you choose to send
+                go directly to that provider; ARAReader has no telemetry or relay service.
               </p>
             </>
           )}
@@ -257,11 +291,11 @@ export function OnboardingModal({
                 </svg>
               </div>
               <div className="onboard-privacy-text">
-                <strong>Your Privacy is Guaranteed</strong>
+                <strong>Private by default</strong>
                 <p>
-                  Your credentials are stored exclusively on this device. ARAReader operates
-                  entirely offline with zero telemetry or tracking, keeping your PDF workflow
-                  private, fluid, and completely yours.
+                  PDF reading and editing happen on this device, with no telemetry. Optional AI
+                  features contact the provider you configure. Automatic document recommendations
+                  are controlled by the separate choice below.
                 </p>
               </div>
             </div>
@@ -487,7 +521,32 @@ export function OnboardingModal({
                 </div>
               )}
 
-              {error && <p className="ai-provider-error">{error}</p>}
+              <div className="onboard-field">
+                <label className="onboard-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={aiAutoSuggestions}
+                    onChange={(e) => {
+                      aiAutoSuggestionsTouchedRef.current = true
+                      setAiAutoSuggestions(e.target.checked)
+                    }}
+                    aria-describedby="onboard-ai-sharing-details"
+                  />
+                  <span>Allow automatic AI recommendations when opening PDFs</span>
+                </label>
+                <p id="onboard-ai-sharing-details" className="onboard-hint">
+                  Off by default. If enabled, opening a PDF while AI is connected sends its
+                  filename, page count, up to 10 outline titles, and up to 1,200 characters from the
+                  first 3 pages to your configured provider. This is separate from chat you start
+                  yourself.
+                </p>
+              </div>
+
+              {error && (
+                <p className="ai-provider-error" role="alert">
+                  {error}
+                </p>
+              )}
 
               <div className="onboard-footer">
                 <div className="onboard-footer-left">

@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>The ARAOffice PDF reader and editor — privacy-first, with a built-in AI copilot</strong><br />
-  <sub>100% Offline · Absolute Zero Telemetry · No Accounts · Pure Local Execution</sub>
+  <sub>Offline-first · Zero Telemetry · No Accounts · Local PDF Processing</sub>
 </p>
 
 ---
@@ -117,15 +117,16 @@ How the keys are handled:
 - Credentials are written to `userData/ai-settings.json` and live in the **main
   process only**. Every renderer sees redacted settings (`hasApiKey: true|false`),
   never the key itself, and streaming runs in the host's AI bridge.
-- Nothing is sent anywhere until a turn runs: the request goes straight from your
-  machine to the endpoint you configured. There is no proxy or relay service.
+- Manually started AI turns go straight from your machine to the endpoint you
+  configured, with no proxy or relay service. Automatic document recommendations
+  can also send limited PDF context when you explicitly enable that setting.
 - Settings changes apply to the next turn without a reload.
 
 ---
 
-## Zero Telemetry & Offline-First Privacy Guarantee
+## Zero Telemetry & Offline-First Privacy
 
-ARAReader is engineered from the ground up on an uncompromising privacy-first principle: **your documents, reading habits, and personal credentials belong entirely to you.**
+ARAReader is offline-first and has no telemetry: **your reading activity and personal credentials stay on your device.** Optional AI and web features contact only the destinations described below, when used.
 
 ### 1. Absolute Zero Telemetry
 
@@ -146,10 +147,10 @@ Network communication is strictly gated and limited to the actions below:
 1. **Configured AI Endpoint:** Direct communication with the API endpoint you choose (e.g. Google AI Studio, custom OpenAI-compatible server, or local Ollama).
 2. **Explicit Web Search & Page Fetch:** Powered by `@arareader/ai-search` only when you explicitly ask the assistant to search the web, with strict SSRF blocklists denying private, loopback, and local network ranges on every redirect hop.
 3. **Application Updates:** Transparent GitHub release check (packaged Windows and macOS builds only, checked 5 seconds after launch and every 4 hours; or on demand via `Help → Check for Updates…`).
-4. **Adaptive Prompt Suggestions (on by default, optional):** When a PDF is opened and AI is connected, ARAReader sends the document name, page count, outline titles, and at most 1,200 characters from the first three pages to your configured AI provider to tailor the suggested prompts. The request is wrapped in explicit untrusted-content delimiters and is never sent to ARA servers. Disable it in `Settings → Preferences → Adaptive AI recommendations on document open`.
+4. **Adaptive Prompt Suggestions (off by default):** Only after you explicitly enable it, opening a PDF while AI is connected sends the filename, page count, up to 10 outline titles, and at most 1,200 characters from the first three pages to your configured AI provider. The request is wrapped in explicit untrusted-content delimiters and is never sent to ARA servers. Manage the choice in `Settings → Preferences → Adaptive AI recommendations on document open`. This is separate from AI chat messages you choose to send.
 
-> [!TIP]
-> For legal firms, medical practices, researchers, and enterprises handling confidential PDFs, ARAReader provides absolute compliance peace of mind: zero telemetry means zero risk of data leakage.
+> [!NOTE]
+> Zero telemetry means ARAReader does not collect usage data. It does not prevent content from being sent to an AI provider or web endpoint you choose to contact. Review that destination's data-handling terms before sending sensitive material.
 
 ---
 

@@ -1,5 +1,5 @@
-import { lookup } from 'node:dns/promises'
-import { BlockList, isIP } from 'node:net'
+import { safeFetch } from './safe-fetch'
+export { isBlockedAddress, isSafeRemoteUrl } from './safe-fetch'
 import type { WebSearchResult } from './shared'
 export type { WebSearchResult } from './shared'
 
@@ -18,57 +18,6 @@ const DEFAULT_EXTRACT_CHARS = 8_000
 const MAX_EXTRACT_CHARS = 50_000
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
-
-const blockedAddresses = (() => {
-  const list = new BlockList()
-  list.addSubnet('0.0.0.0', 8)
-  list.addSubnet('10.0.0.0', 8)
-  list.addSubnet('100.64.0.0', 10)
-  list.addSubnet('127.0.0.0', 8)
-  list.addSubnet('169.254.0.0', 16)
-  list.addSubnet('172.16.0.0', 12)
-  list.addSubnet('192.0.0.0', 24)
-  list.addSubnet('192.168.0.0', 16)
-  list.addSubnet('198.18.0.0', 15)
-  list.addSubnet('224.0.0.0', 4)
-  list.addSubnet('240.0.0.0', 4)
-  list.addAddress('::', 'ipv6')
-  list.addAddress('::1', 'ipv6')
-  list.addSubnet('::', 96, 'ipv6')
-  list.addSubnet('64:ff9b::', 96, 'ipv6')
-  list.addSubnet('fc00::', 7, 'ipv6')
-  list.addSubnet('fe80::', 10, 'ipv6')
-  list.addSubnet('ff00::', 8, 'ipv6')
-  return list
-})()
-
-const BLOCKED_HOST_SUFFIXES: readonly string[] = ['.localhost', '.local', '.internal']
-
-export function isBlockedAddress(ip: string): boolean {
-  const type = isIP(ip)
-  return type === 0 || blockedAddresses.check(ip, type === 4 ? 'ipv4' : 'ipv6')
-}
-
-export async function isSafeRemoteUrl(raw: unknown): Promise<boolean> {
-  if (typeof raw !== 'string') return false
-  let parsed: URL
-  try {
-    parsed = new URL(raw)
-  } catch {
-    return false
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
-  const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase()
-  if (host === '') return false
-  if (isIP(host)) return !isBlockedAddress(host)
-  if (host === 'localhost' || BLOCKED_HOST_SUFFIXES.some((s) => host.endsWith(s))) return false
-  try {
-    const addrs = await lookup(host, { all: true })
-    return addrs.length > 0 && addrs.every((a) => !isBlockedAddress(a.address))
-  } catch {
-    return false
-  }
-}
 
 export function decodeHtmlEntities(text: string): string {
   return text
@@ -274,14 +223,18 @@ export async function webSearch(
 
   // 1. Primary Credential-Free: Brave Web Search (clean, fast, unblocked globally)
   try {
-    const res = await fetch(`https://search.brave.com/search?q=${encodeURIComponent(cleanQuery)}`, {
-      headers: {
-        'User-Agent': USER_AGENT,
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
+    const res = await safeFetch(
+      `https://search.brave.com/search?q=${encodeURIComponent(cleanQuery)}`,
+      {
+        headers: {
+          'User-Agent': USER_AGENT,
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        timeout: 6000,
       },
-      signal: AbortSignal.timeout(6000),
-    })
+    )
+    if (!res.ok) res.discard()
     if (res.ok) {
       const html = await res.text()
       const results = parseBraveResults(html, limit)
@@ -295,7 +248,7 @@ export async function webSearch(
 
   // 2. Secondary: Bing Web Search
   try {
-    const res = await fetch(
+    const res = await safeFetch(
       `https://www.bing.com/search?q=${encodeURIComponent(cleanQuery)}&setlang=en`,
       {
         headers: {
@@ -303,9 +256,10 @@ export async function webSearch(
           Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9',
         },
-        signal: AbortSignal.timeout(6000),
+        timeout: 6000,
       },
     )
+    if (!res.ok) res.discard()
     if (res.ok) {
       const html = await res.text()
       const results = parseBingResults(html, limit, cleanQuery)
@@ -319,14 +273,18 @@ export async function webSearch(
 
   // 3. Tertiary: Yahoo Web Search
   try {
-    const res = await fetch(`https://search.yahoo.com/search?p=${encodeURIComponent(cleanQuery)}`, {
-      headers: {
-        'User-Agent': USER_AGENT,
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
+    const res = await safeFetch(
+      `https://search.yahoo.com/search?p=${encodeURIComponent(cleanQuery)}`,
+      {
+        headers: {
+          'User-Agent': USER_AGENT,
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        timeout: 6000,
       },
-      signal: AbortSignal.timeout(6000),
-    })
+    )
+    if (!res.ok) res.discard()
     if (res.ok) {
       const html = await res.text()
       const results = parseYahooResults(html, limit, cleanQuery)
@@ -341,10 +299,11 @@ export async function webSearch(
   // 4. Wikipedia Search (full-text search first, prefix opensearch fallback)
   try {
     const wikiQueryUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(cleanQuery)}&srlimit=${limit}&format=json`
-    const res = await fetch(wikiQueryUrl, {
-      headers: { 'User-Agent': 'ARAReader/0.2.2 (https://github.com/funara/arareader)' },
-      signal: AbortSignal.timeout(4000),
+    const res = await safeFetch(wikiQueryUrl, {
+      headers: { 'User-Agent': 'ARAReader/0.2.3 (https://github.com/funara/arareader)' },
+      timeout: 4000,
     })
+    if (!res.ok) res.discard()
     if (res.ok) {
       const data = (await res.json()) as {
         query?: {
@@ -370,10 +329,11 @@ export async function webSearch(
 
   try {
     const wikiUrl = `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(cleanQuery)}&limit=${limit}&namespace=0&format=json`
-    const res = await fetch(wikiUrl, {
-      headers: { 'User-Agent': 'ARAReader/0.2.2 (https://github.com/funara/arareader)' },
-      signal: AbortSignal.timeout(4000),
+    const res = await safeFetch(wikiUrl, {
+      headers: { 'User-Agent': 'ARAReader/0.2.3 (https://github.com/funara/arareader)' },
+      timeout: 4000,
     })
+    if (!res.ok) res.discard()
     if (res.ok) {
       const data = (await res.json()) as [string, string[], string[], string[]]
       const titles = data[1] || []
@@ -403,7 +363,7 @@ export async function webSearch(
 }
 
 /**
- * Extracts readable plain text content from a web URL using native HTTP fetch.
+ * Extracts readable plain text content from a web URL using guarded HTTP requests.
  */
 export async function webExtract(
   url: string,
@@ -416,41 +376,21 @@ export async function webExtract(
       : Math.min(MAX_EXTRACT_CHARS, Math.max(200, maxChars))
 
   try {
-    let currentUrl = url
-    let res: Response | null = null
-    for (let hop = 0; hop <= 5; hop++) {
-      if (!(await isSafeRemoteUrl(currentUrl))) {
-        return { url, excerpt: 'Private or unsafe network hosts are not accessible' }
-      }
-      res = await fetch(currentUrl, {
-        headers: {
-          'User-Agent': USER_AGENT,
-          Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9',
-        },
-        signal: AbortSignal.timeout(10000),
-        redirect: 'manual',
-      })
-      const status = typeof res.status === 'number' ? res.status : res.ok ? 200 : 500
-      if (status < 300 || status >= 400) break
-      const location = res.headers.get('location')
-      if (!location) {
-        return { url, excerpt: 'Redirect missing location header' }
-      }
-      try {
-        currentUrl = new URL(location, currentUrl).toString()
-      } catch {
-        return { url, excerpt: `Invalid redirect location: ${location}` }
-      }
-    }
-    if (!res) {
-      return { url, excerpt: 'Too many redirects' }
-    }
+    const res = await safeFetch(url, {
+      headers: {
+        'User-Agent': USER_AGENT,
+        Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9',
+      },
+      timeout: 10000,
+    })
     if (!res.ok) {
+      res.discard()
       return { url, excerpt: `HTTP ${res.status} ${res.statusText}` }
     }
 
     const contentType = res.headers.get('content-type') || ''
     if (contentType.includes('application/pdf')) {
+      res.discard()
       return { url, isPdf: true, excerpt: '[PDF Document]' }
     }
 

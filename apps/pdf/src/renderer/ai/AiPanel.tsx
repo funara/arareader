@@ -298,6 +298,7 @@ export function AiPanel({
   const [scanningContext, setScanningContext] = useState(false)
   /** null until the preference is known: an automatic scan must never start before it */
   const [aiAutoSuggestions, setAiAutoSuggestions] = useState<boolean | null>(null)
+  const aiAutoSuggestionsRef = useRef<boolean | null>(null)
   const [scanNonce, setScanNonce] = useState(0)
   const userCanceledScanRef = useRef(false)
   const scanAbortControllerRef = useRef<AbortController | null>(null)
@@ -328,22 +329,30 @@ export function AiPanel({
 
   useEffect(() => {
     let canceled = false
+    let receivedChange = false
     void window.pdfApi
       ?.getPreferences?.()
       .then((prefs) => {
-        if (!canceled && prefs) {
-          setAiAutoSuggestions(prefs.aiAutoSuggestions !== false)
+        if (!canceled && !receivedChange && prefs) {
+          const enabled =
+            prefs.aiAutoSuggestionsConsentVersion === 1 && prefs.aiAutoSuggestions === true
+          aiAutoSuggestionsRef.current = enabled
+          setAiAutoSuggestions(enabled)
         }
       })
       .catch(() => {})
     const unsub = window.pdfApi?.onPreferencesChanged?.((prefs) => {
       if (!canceled && prefs) {
-        const enabled = prefs.aiAutoSuggestions !== false
+        receivedChange = true
+        const enabled =
+          prefs.aiAutoSuggestionsConsentVersion === 1 && prefs.aiAutoSuggestions === true
+        const wasEnabled = aiAutoSuggestionsRef.current
+        aiAutoSuggestionsRef.current = enabled
         setAiAutoSuggestions(enabled)
         if (!enabled) {
           setSuggestions([])
           setScanningContext(false)
-        } else {
+        } else if (wasEnabled !== true) {
           scannedDocRef.current = null
         }
       }
@@ -414,6 +423,13 @@ export function AiPanel({
   const runToolsRef = useRef<PersistedTool[]>([])
   const attachmentsRef = useRef(attachments)
   attachmentsRef.current = attachments
+  const noticeTimerRef = useRef<number | null>(null)
+  useEffect(
+    () => () => {
+      if (noticeTimerRef.current !== null) window.clearTimeout(noticeTimerRef.current)
+    },
+    [],
+  )
   /** image paths with a read already issued — one readAttachmentImage per attach, even while pending */
   const previewRequestedRef = useRef(new Set<string>())
 
@@ -497,8 +513,12 @@ export function AiPanel({
   }, [attachments])
 
   const notice = (text: string): void => {
+    if (noticeTimerRef.current !== null) window.clearTimeout(noticeTimerRef.current)
     setAttachNotice(text)
-    window.setTimeout(() => setAttachNotice(null), 5000)
+    noticeTimerRef.current = window.setTimeout(() => {
+      noticeTimerRef.current = null
+      setAttachNotice(null)
+    }, 5000)
   }
 
   /** One attachment per chat: keep the first accepted file and explain what was dropped */
@@ -922,6 +942,7 @@ export function AiPanel({
       pageCount: () => apiRef.current.pageCount(),
       currentPage: () => apiRef.current.currentPage(),
       readOnly: () => apiRef.current.readOnly(),
+      beginEdit: () => (apiRef.current.beginEdit ? apiRef.current.beginEdit() : () => {}),
       outline: () => apiRef.current.outline(),
       searchIndex: () => apiRef.current.searchIndex(),
       isDeleted: (i) => apiRef.current.isDeleted(i),
@@ -1232,7 +1253,7 @@ export function AiPanel({
     if (imageAttachments.length > MAX_IMAGES_PER_MESSAGE) {
       failures.push(`At most ${MAX_IMAGES_PER_MESSAGE} images can be sent per message.`)
     }
-    if (failures.length > 0) notice(failures.join(';'))
+    if (failures.length > 0) throw new Error(failures.join('; '))
     return images
   }
 
@@ -1280,7 +1301,7 @@ export function AiPanel({
   }
 
   /**
-   * Start one run. `reuseAttachments` re-grants and re-sends the previous message's
+   * Start one run. `reuseAttachments` re-sends the previous message's
    * attachments (safe retry) instead of silently sending a different request.
    */
   const runWith = (
@@ -1325,11 +1346,7 @@ export function AiPanel({
         if (session !== sessionRef.current) return // New chat / doc replaced / unmounted
         // The model is transport configuration, so stored settings pass through.
         settingsRef.current = nextSettings
-        // A rejected image read must not strand the run (busy would stay true forever)
-        const images = await collectImageAttachments(turnAttachments).catch((): AgentImage[] => {
-          notice('The images could not be read; sending the message without them.')
-          return []
-        })
+        const images = await collectImageAttachments(turnAttachments)
         if (session !== sessionRef.current) return
         // Stop landed while settings/images were being read: the request never starts
         if (pendingStopRef.current) {
@@ -1360,22 +1377,34 @@ export function AiPanel({
 
   const continueRun = (): void => runWith(CONTINUE_INSTRUCTION)
 
-  /**
-   * Retry a message whose run failed before anything was applied. Attachments are
-   * re-granted through the normal files:add path and re-sent, so the retry is the
-   * same request — never a silently stripped one.
-   */
+  /** Ask the user to confirm the same files through the main-process picker. */
+  const reselectAttachments = async (paths: string[]): Promise<AttachmentMeta[] | null> => {
+    notice('Select the original attachment in the file picker to continue.')
+    const result = await window.pdfApi.pickAttachments('reselect')
+    if (!result || result.rejected.length > 0 || result.accepted.length !== paths.length)
+      return null
+    if (!paths.every((path) => result.accepted.some((attachment) => attachment.path === path))) {
+      return null
+    }
+    return result.accepted
+  }
+
+  /** Retry only with all original attachments available to this view. */
   const retryWithAttachments = async (entry: ChatEntry): Promise<void> => {
     const paths = attachmentPathsForRetry(entry)
     let reuse: AttachmentMeta[] | undefined
     if (paths.length > 0) {
       try {
         const result = await window.pdfApi.addAttachmentPaths(paths)
-        if (result.rejected.length > 0 || result.accepted.length !== paths.length) {
+        if (result.rejected.length === 0 && result.ungranted?.length) {
+          reuse = (await reselectAttachments(paths)) ?? undefined
+        } else if (result.rejected.length === 0 && result.accepted.length === paths.length) {
+          reuse = result.accepted
+        }
+        if (!reuse) {
           notice('The original attachment is no longer available; attach it again before retrying.')
           return
         }
-        reuse = result.accepted
       } catch {
         notice('The original attachment is no longer available; attach it again before retrying.')
         return
@@ -1392,37 +1421,117 @@ export function AiPanel({
     }
   }
 
+  /** Only the picker can authorize file-backed inputs; preserve their original order. */
+  const selectTransferredFiles = async (
+    paths: string[],
+    total: number,
+    priorRejections: string[] = [],
+  ): Promise<boolean> => {
+    notice('Select the first supported transferred file in the file picker to attach it.')
+    const result = await window.pdfApi.pickAttachments('reselect')
+    const first = paths
+      .map((path) => result?.accepted.find((attachment) => attachment.path === path))
+      .find((attachment) => attachment !== undefined)
+    if (!first) {
+      notice(
+        [
+          'No transferred file was attached; select a matching supported file to continue.',
+          ...priorRejections,
+          ...(result?.rejected ?? []),
+        ].join(' '),
+      )
+      if (result && result.accepted.length === 0 && result.rejected.length > 0) {
+        priorRejections.push(...result.rejected)
+        return true
+      }
+      return false
+    }
+    mergeAttachments({ accepted: [first], rejected: [] })
+    const messages = [...priorRejections, ...result!.rejected]
+    if (total > 1 || result!.accepted.length > 1) {
+      messages.push('Only one attachment is allowed; other files were ignored.')
+    }
+    if (messages.length > 0) notice(messages.join(' '))
+    return false
+  }
+
   const onDrop = async (event: DragEvent): Promise<void> => {
     event.preventDefault()
     event.stopPropagation()
     setDragOver(false)
-    const paths = Array.from(event.dataTransfer.files)
-      .map((file) => window.pdfApi.getPathForFile(file))
-      .filter(Boolean)
-    if (paths.length === 0) return
+    const files = Array.from(event.dataTransfer.files)
+    if (files.length === 0) return
+    if (attachmentsRef.current.length > 0) {
+      notice('Only one attachment is allowed per chat. Remove the current file first.')
+      return
+    }
     try {
-      mergeAttachments(await window.pdfApi.addAttachmentPaths(paths))
+      const paths = files.map((file) => window.pdfApi.getPathForFile(file)).filter(Boolean)
+      if (paths.length === 0) {
+        notice('The dropped files could not be attached.')
+        return
+      }
+      await selectTransferredFiles(paths, files.length)
     } catch {
-      notice('The dropped file could not be attached.')
+      notice('The dropped files could not be attached.')
     }
   }
 
-  /** Files pasted into the composer: local paths use the normal flow, image bytes are saved first */
+  /** File-backed pastes require selection; clipboard bitmap bytes are saved directly. */
   const onPasteFiles = async (files: File[]): Promise<void> => {
+    if (attachmentsRef.current.length > 0) {
+      notice('Only one attachment is allowed per chat. Remove the current file first.')
+      return
+    }
     try {
-      const paths: string[] = []
-      for (const file of files) {
-        const path = window.pdfApi.getPathForFile(file)
+      const rejected: string[] = []
+      const paths = files.map((file) => window.pdfApi.getPathForFile(file))
+      let selected: AttachmentAddResult | null | undefined
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i]!
+        const path = paths[i]
         if (path) {
-          paths.push(path)
+          if (selected === undefined) {
+            notice('Select the first supported transferred file in the file picker to attach it.')
+            selected = await window.pdfApi.pickAttachments('reselect')
+            if (
+              !selected ||
+              (selected.accepted.length > 0 &&
+                !selected.accepted.some((a) => paths.includes(a.path)))
+            ) {
+              notice(
+                'No transferred file was attached; select a matching supported file to continue.',
+              )
+              return
+            }
+            rejected.push(...selected.rejected)
+          }
+          const match = selected?.accepted.find((a) => a.path === path)
+          if (match) {
+            mergeAttachments({ accepted: [match], rejected: [] })
+            if (files.length > 1)
+              rejected.push('Only one attachment is allowed; other files were ignored.')
+            if (rejected.length > 0) notice(rejected.join(' '))
+            return
+          }
           continue
         }
         const ext = PASTE_MIME_EXT[file.type] ?? file.name.split('.').pop()?.toLowerCase() ?? 'bin'
-        mergeAttachments(await window.pdfApi.addPastedImage(await file.arrayBuffer(), ext))
+        const result = await window.pdfApi.addPastedImage(await file.arrayBuffer(), ext)
+        rejected.push(...result.rejected)
+        if (result.accepted.length > 0) {
+          mergeAttachments({ accepted: result.accepted.slice(0, 1), rejected: [] })
+          if (files.length > 1)
+            rejected.push('Only one attachment is allowed; other files were ignored.')
+          if (rejected.length > 0) notice(rejected.join(' '))
+          return
+        }
       }
-      if (paths.length > 0) mergeAttachments(await window.pdfApi.addAttachmentPaths(paths))
+      if (rejected.length > 0) notice(rejected.join(' '))
+      else if (selected)
+        notice('No transferred file was attached; select a matching supported file to continue.')
     } catch {
-      notice('The pasted file could not be attached.')
+      notice('The pasted files could not be attached.')
     }
   }
 

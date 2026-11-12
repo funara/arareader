@@ -6,6 +6,7 @@ import type { TFunc } from './i18n/locale'
 
 /** Raster width of a grid thumbnail, in CSS px; the card stretches it to its column width */
 const THUMB_W = 160
+const ORGANIZE_DRAG_TYPE = 'application/x-arareader-organize-page'
 
 /** Thumbnail canvas for one grid card: renders only when visible, keeps the bitmap while
  *  offscreen, and cancels its render task on unmount (mirrors the sidebar PdfThumb). */
@@ -104,9 +105,11 @@ export function OrganizeGrid({
   onDelete,
   onInsertBlank,
   onDuplicate,
+  onMovePage,
   readOnly,
   t,
   actionsDisabled = false,
+  moveDisabled,
   currentOrigIdx,
   error = '',
 }: {
@@ -121,11 +124,14 @@ export function OrganizeGrid({
   onDelete: (origIndices: number[]) => void
   onInsertBlank: (afterOrigIdx: number) => void
   onDuplicate: (origIndices: number[]) => void
+  onMovePage: (from: number, to: number) => void
   readOnly: boolean
   t: TFunc
   /** Immediate file writes are unavailable while the file's pages still differ from
    *  the pending `deleted`/`order` state (the grid is then view/select only) */
   actionsDisabled?: boolean
+  /** Save, refresh, close, and direct-operation locks; pending reorder/deletion do not block moves */
+  moveDisabled: boolean
   /** Original index of the page the reader is on; Insert blank falls back to it */
   currentOrigIdx?: number
   /** Last file-write failure; the grid covers the status bar that would show it */
@@ -133,9 +139,13 @@ export function OrganizeGrid({
 }): ReactElement {
   const gridRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const cardRefs = useRef<(HTMLButtonElement | null)[]>([])
-  /** Last plain/Ctrl-clicked card position, the Shift-click range anchor */
+  const cardRefs = useRef(new Map<number, HTMLButtonElement>())
+  /** Original page identity keeps Shift ranges stable when displayed positions change. */
   const anchorRef = useRef<number | null>(null)
+  const dragFromOrigRef = useRef<number | null>(null)
+  const [focusedOrigIdx, setFocusedOrigIdx] = useState<number | null>(null)
+  const [dragFromOrigIdx, setDragFromOrigIdx] = useState<number | null>(null)
+  const [dragOverOrigIdx, setDragOverOrigIdx] = useState<number | null>(null)
   const [visible, setVisible] = useState<Set<number>>(new Set())
   const count = visList.length
 
@@ -143,32 +153,41 @@ export function OrganizeGrid({
   // controls instead of the hidden ones behind it
   useEffect(() => {
     scrollRef.current?.focus()
+    return () => {
+      dragFromOrigRef.current = null
+    }
   }, [])
 
-  // Lazy thumbnails: observe cards against the grid's own scroll root
+  // Lazy thumbnails are keyed by original page identity, not a display position that can move.
   useEffect(() => {
     const root = scrollRef.current
     if (!root || count === 0) return
+    const livePages = new Set(visList)
+    setVisible((prev) => {
+      const next = new Set([...prev].filter((origIdx) => livePages.has(origIdx)))
+      return next.size === prev.size ? prev : next
+    })
     const io = new IntersectionObserver(
       (entries) => {
         setVisible((prev) => {
           const next = new Set(prev)
           for (const e of entries) {
-            const idx = Number((e.target as HTMLElement).dataset.idx)
-            if (e.isIntersecting) next.add(idx)
-            else next.delete(idx)
+            const origIdx = Number((e.target as HTMLElement).dataset.origIdx)
+            if (e.isIntersecting) next.add(origIdx)
+            else next.delete(origIdx)
           }
           return next
         })
       },
       { root, rootMargin: '240px' },
     )
-    for (const el of cardRefs.current) if (el) io.observe(el)
+    for (const el of cardRefs.current.values()) io.observe(el)
     return () => io.disconnect()
-  }, [count])
+  }, [count, visList])
 
-  const setCardRef = (idx: number) => (el: HTMLButtonElement | null) => {
-    cardRefs.current[idx] = el
+  const setCardRef = (origIdx: number) => (el: HTMLButtonElement | null) => {
+    if (el) cardRefs.current.set(origIdx, el)
+    else cardRefs.current.delete(origIdx)
   }
 
   const selectedOrig = visList.filter((origIdx) => selected.has(origIdx))
@@ -176,13 +195,43 @@ export function OrganizeGrid({
   /** Insert blank goes after the last selected page, else after the reader's current page */
   const insertAnchor =
     selectedOrig.length > 0 ? selectedOrig[selectedOrig.length - 1] : (currentOrigIdx ?? -1)
+  const moveTargetOrigIdx =
+    focusedOrigIdx !== null && visList.includes(focusedOrigIdx) ? focusedOrigIdx : selectedOrig[0]
+  const moveTargetPos = moveTargetOrigIdx === undefined ? -1 : visList.indexOf(moveTargetOrigIdx)
+  const canReorder = !readOnly && !moveDisabled && count > 1
+
+  useEffect(() => {
+    if (focusedOrigIdx !== null && !visList.includes(focusedOrigIdx)) setFocusedOrigIdx(null)
+  }, [focusedOrigIdx, visList])
+
+  const movePageAt = (from: number, to: number): void => {
+    if (!canReorder || from === to || from < 0 || to < 0 || from >= count || to >= count) return
+    const movedOrigIdx = visList[from]
+    if (movedOrigIdx === undefined) return
+    onMovePage(from, to)
+    requestAnimationFrame(() => {
+      cardRefs.current.get(movedOrigIdx)?.focus({ preventScroll: true })
+    })
+  }
+
+  const moveFocusedPage = (dir: -1 | 1): void => {
+    if (moveTargetPos < 0) return
+    movePageAt(moveTargetPos, moveTargetPos + dir)
+  }
+
+  const clearDrag = (): void => {
+    dragFromOrigRef.current = null
+    setDragFromOrigIdx(null)
+    setDragOverOrigIdx(null)
+  }
 
   const onCardClick = (e: React.MouseEvent<HTMLButtonElement>, pos: number, origIdx: number) => {
     if (readOnly) return
     if (e.shiftKey) {
-      const anchor = anchorRef.current
-      if (anchor === null) {
-        anchorRef.current = pos
+      const anchorOrigIdx = anchorRef.current
+      const anchor = anchorOrigIdx === null ? -1 : visList.indexOf(anchorOrigIdx)
+      if (anchor < 0) {
+        anchorRef.current = origIdx
         onSelect(new Set([origIdx]))
         return
       }
@@ -191,7 +240,7 @@ export function OrganizeGrid({
       onSelect(new Set(visList.slice(lo, hi + 1)))
       return
     }
-    anchorRef.current = pos
+    anchorRef.current = origIdx
     if (e.ctrlKey || e.metaKey) {
       const next = new Set(selected)
       if (next.has(origIdx)) next.delete(origIdx)
@@ -267,6 +316,26 @@ export function OrganizeGrid({
           <button
             type="button"
             className="pdf-modal-btn"
+            title={t('movePageEarlier')}
+            aria-label={t('movePageEarlier')}
+            disabled={!canReorder || moveTargetPos <= 0}
+            onClick={() => moveFocusedPage(-1)}
+          >
+            {t('movePageEarlier')}
+          </button>
+          <button
+            type="button"
+            className="pdf-modal-btn"
+            title={t('movePageLater')}
+            aria-label={t('movePageLater')}
+            disabled={!canReorder || moveTargetPos < 0 || moveTargetPos >= count - 1}
+            onClick={() => moveFocusedPage(1)}
+          >
+            {t('movePageLater')}
+          </button>
+          <button
+            type="button"
+            className="pdf-modal-btn"
             title={t('insertBlankPage')}
             disabled={readOnly || actionsDisabled}
             onClick={() => onInsertBlank(insertAnchor)}
@@ -337,15 +406,20 @@ export function OrganizeGrid({
         >
           {visList.map((origIdx, v) => {
             const isSelected = selected.has(origIdx)
+            const isDragging = dragFromOrigIdx === origIdx
+            const isDropTarget = dragOverOrigIdx === origIdx
             return (
               <button
                 key={origIdx}
                 type="button"
-                ref={setCardRef(v)}
+                ref={setCardRef(origIdx)}
                 data-idx={v}
                 data-orig-idx={origIdx}
-                className={`pdf-organize-card${isSelected ? ' pdf-organize-card-active' : ''}`}
+                className={`pdf-organize-card${isSelected ? ' pdf-organize-card-active' : ''}${
+                  isDragging ? ' pdf-organize-card-dragging' : ''
+                }${isDropTarget ? ' pdf-organize-card-drop' : ''}`}
                 disabled={readOnly}
+                draggable={canReorder}
                 title={t('appPageOf', { current: v + 1, total: count })}
                 style={{
                   display: 'flex',
@@ -357,8 +431,53 @@ export function OrganizeGrid({
                   border: `1px solid ${isSelected ? 'var(--accent)' : 'var(--border)'}`,
                   borderRadius: 8,
                   boxShadow: isSelected ? '0 0 0 2px var(--accent)' : 'none',
-                  cursor: readOnly ? 'default' : 'pointer',
+                  cursor: canReorder ? 'grab' : 'default',
                 }}
+                onFocus={() => setFocusedOrigIdx(origIdx)}
+                onDragStart={(e) => {
+                  if (!canReorder) {
+                    e.preventDefault()
+                    return
+                  }
+                  e.dataTransfer.effectAllowed = 'move'
+                  e.dataTransfer.setData(ORGANIZE_DRAG_TYPE, String(origIdx))
+                  dragFromOrigRef.current = origIdx
+                  setDragFromOrigIdx(origIdx)
+                }}
+                onDragOver={(e) => {
+                  if (
+                    !canReorder ||
+                    dragFromOrigRef.current === null ||
+                    !Array.from(e.dataTransfer.types).includes(ORGANIZE_DRAG_TYPE)
+                  )
+                    return
+                  e.preventDefault()
+                  e.dataTransfer.dropEffect = 'move'
+                  setDragOverOrigIdx(dragFromOrigRef.current === origIdx ? null : origIdx)
+                }}
+                onDragLeave={(e) => {
+                  const relatedTarget = e.relatedTarget
+                  if (
+                    !(relatedTarget instanceof Node) ||
+                    !e.currentTarget.contains(relatedTarget)
+                  ) {
+                    setDragOverOrigIdx((current) => (current === origIdx ? null : current))
+                  }
+                }}
+                onDrop={(e) => {
+                  const draggedOrigIdx = dragFromOrigRef.current
+                  const validDrop =
+                    canReorder &&
+                    draggedOrigIdx !== null &&
+                    Array.from(e.dataTransfer.types).includes(ORGANIZE_DRAG_TYPE) &&
+                    e.dataTransfer.getData(ORGANIZE_DRAG_TYPE) === String(draggedOrigIdx)
+                  if (validDrop) {
+                    e.preventDefault()
+                    movePageAt(visList.indexOf(draggedOrigIdx), v)
+                  }
+                  clearDrag()
+                }}
+                onDragEnd={clearDrag}
                 onClick={(e) => onCardClick(e, v, origIdx)}
               >
                 <span
@@ -369,7 +488,7 @@ export function OrganizeGrid({
                     doc={doc}
                     pageNo={origIdx + 1}
                     rotationDelta={rotDelta(origIdx)}
-                    visible={visible.has(v)}
+                    visible={visible.has(origIdx)}
                   />
                 </span>
                 <span className="pdf-organize-no" style={{ color: 'var(--text-muted)' }}>

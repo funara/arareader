@@ -61,6 +61,8 @@ export interface AttachmentAddResult {
   accepted: AttachmentMeta[]
   /** per-file rejection messages (too large / unsupported type / unreadable) */
   rejected: string[]
+  /** Paths requiring a fresh user selection during revalidation. */
+  ungranted?: string[]
 }
 
 export interface AttachmentReadResult {

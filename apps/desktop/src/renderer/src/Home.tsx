@@ -256,7 +256,6 @@ export function Home({ active }: { active: boolean }) {
 
   const handleSaveOnboarding = useCallback(
     async (displayName: string, fullName: string, useAsDefaultAuthor: boolean) => {
-      setOnboardOpen(false)
       const current = prefsRef.current ?? {
         profile: {
           displayName: '',
@@ -271,7 +270,7 @@ export function Home({ active }: { active: boolean }) {
         defaultZoom: 'fit-width' as const,
         defaultSidebar: 'none' as const,
         autosave: false,
-        aiAutoSuggestions: true,
+        aiAutoSuggestions: false,
       }
       const dn = displayName.trim() || fullName.trim() || 'ARAReader'
       const fn = fullName.trim() || dn || 'ARAReader'
@@ -285,15 +284,10 @@ export function Home({ active }: { active: boolean }) {
         },
         onboardingCompleted: true,
       }
-      prefsRef.current = next
-      setUserName(next.profile.displayName)
-      if (window.reader.setPreferences) {
-        try {
-          await window.reader.setPreferences(next)
-        } catch {
-          // ignore
-        }
-      }
+      const saved = await window.reader.setPreferences(next)
+      prefsRef.current = saved
+      setUserName(saved.profile.displayName)
+      setOnboardOpen(false)
       if (window.readerAi?.getSettings) {
         window.readerAi
           .getSettings()
@@ -321,7 +315,7 @@ export function Home({ active }: { active: boolean }) {
       defaultZoom: 'fit-width' as const,
       defaultSidebar: 'none' as const,
       autosave: false,
-      aiAutoSuggestions: true,
+      aiAutoSuggestions: false,
     }
     const next: ReaderPreferences = {
       ...current,
@@ -398,7 +392,7 @@ export function Home({ active }: { active: boolean }) {
     if (!active) return
     let canceled = false
     void window.reader
-      .recents()
+      .recents({ limit: 100 })
       .then((page) => {
         if (canceled) return
         setEntries(page.entries)
@@ -545,9 +539,9 @@ export function Home({ active }: { active: boolean }) {
                   else setShowChangelog(true)
                 }}
                 title={versionTitle}
-                aria-label={`${t('versionLabel')}: v${appVersion || '0.2.2'}`}
+                aria-label={`${t('versionLabel')}: v${appVersion || '0.2.3'}`}
               >
-                <span>v{appVersion || '0.2.2'}</span>
+                <span>v{appVersion || '0.2.3'}</span>
                 {updatePending && (
                   <span
                     className={`version-pulse-dot ${

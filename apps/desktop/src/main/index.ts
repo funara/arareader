@@ -29,13 +29,14 @@ import { isLang, normalizeLang, setUiLang, type Lang } from '@arareader/i18n'
 import {
   configurePdfRuntime,
   requestPdfClose,
+  resumePdfClosePrompt,
   setPdfFileSavedHook,
   setPdfOpenPathHandler,
 } from '../../../pdf/src/main/pdf-main'
 import { PDF_CHANNELS } from '../../../pdf/src/shared/ipc'
 import type { PdfMenuCommand } from '../../../pdf/src/shared/ipc'
 import { projectFileRenamed, registerAiBridge } from './ai-bridge'
-import { readAppSettings, writeAppSetting } from './app-settings'
+import { readAppSettings, updateAppSetting, writeAppSetting } from './app-settings'
 import { createBlankPdfBytes } from './blank-pdf'
 import { readRecentPage, recordRecentFile, removeRecentFiles } from './recent-files'
 import { TabManager } from './tab-manager'
@@ -229,6 +230,10 @@ function normalizePreferences(raw: unknown): ReaderPreferences {
     obj.defaultSidebar === 'outline'
       ? obj.defaultSidebar
       : 'none'
+  const aiAutoSuggestionsConsentVersion =
+    obj.aiAutoSuggestionsConsentVersion === 1 && typeof obj.aiAutoSuggestions === 'boolean'
+      ? 1
+      : undefined
   return {
     profile: normalizeProfile(obj.profile),
     signatures: normalizeSignatures(obj.signatures),
@@ -236,7 +241,8 @@ function normalizePreferences(raw: unknown): ReaderPreferences {
     defaultZoom,
     defaultSidebar,
     autosave: obj.autosave === true,
-    aiAutoSuggestions: obj.aiAutoSuggestions !== false,
+    aiAutoSuggestions: aiAutoSuggestionsConsentVersion === 1 && obj.aiAutoSuggestions === true,
+    ...(aiAutoSuggestionsConsentVersion ? { aiAutoSuggestionsConsentVersion } : {}),
     onboardingCompleted: obj.onboardingCompleted === true,
   }
 }
@@ -246,9 +252,45 @@ async function readPreferences(): Promise<ReaderPreferences> {
   return normalizePreferences(settings.userPreferences)
 }
 
-async function writePreferences(next: unknown): Promise<ReaderPreferences> {
-  const normalized = normalizePreferences(next)
-  await writeAppSetting(APP_SETTINGS_PATH(), 'userPreferences', normalized)
+async function writePreferences(
+  next: unknown,
+  acceptConsentAction = false,
+): Promise<ReaderPreferences> {
+  let normalized = normalizePreferences(next)
+  await updateAppSetting(APP_SETTINGS_PATH(), 'userPreferences', (current) => {
+    const incoming =
+      next && typeof next === 'object' && !Array.isArray(next)
+        ? (next as Record<string, unknown>)
+        : {}
+    const saved =
+      current && typeof current === 'object' && !Array.isArray(current)
+        ? (current as Record<string, unknown>)
+        : {}
+    // Only a deliberate checkbox action may change consent; stale snapshots preserve the stored choice.
+    const hasExplicitConsentAction =
+      acceptConsentAction &&
+      incoming.aiAutoSuggestionsConsentAction === true &&
+      incoming.aiAutoSuggestionsConsentVersion === 1 &&
+      typeof incoming.aiAutoSuggestions === 'boolean'
+    const hasSavedConsent =
+      saved.aiAutoSuggestionsConsentVersion === 1 && typeof saved.aiAutoSuggestions === 'boolean'
+    const preferences = hasExplicitConsentAction
+      ? next
+      : hasSavedConsent
+        ? {
+            ...incoming,
+            aiAutoSuggestions: saved.aiAutoSuggestions,
+            aiAutoSuggestionsConsentVersion: 1,
+          }
+        : {
+            ...incoming,
+            aiAutoSuggestions: false,
+            aiAutoSuggestionsConsentVersion: undefined,
+            aiAutoSuggestionsConsentAction: undefined,
+          }
+    normalized = normalizePreferences(preferences)
+    return normalized
+  })
   broadcast(HOME_CHANNELS.preferencesChanged, normalized)
   return normalized
 }
@@ -457,21 +499,30 @@ function createWindow(): void {
   win.on('maximize', () => win.webContents.send(WINDOW_CHANNELS.stateChanged, true))
   win.on('unmaximize', () => win.webContents.send(WINDOW_CHANNELS.stateChanged, false))
 
-  // Closing the whole window walks every dirty PDF tab through the same
-  // save/don't-save/cancel prompt as closing it; any cancel aborts the close.
+  // Every PDF waits for in-flight work before deciding whether it needs a save prompt.
   let closeConfirmed = false
+  let closeChecking = false
   win.on('close', (event) => {
     if (closeConfirmed) return
-    const dirty = manager.dirtyPdfTabs()
-    if (dirty.length === 0) return
+    const tabs = manager.pdfTabs()
+    if (tabs.length === 0) return
     event.preventDefault()
+    if (closeChecking) return
+    closeChecking = true
     void (async () => {
-      for (const tab of dirty) {
+      const approved: Array<(typeof tabs)[number] & { discarded: boolean }> = []
+      for (const tab of tabs) {
         manager.activateTab(tab.id)
-        if (!(await requestPdfClose(tab.webContents, win))) {
+        const decision = await requestPdfClose(tab.webContents, win)
+        if (!decision.approved) {
+          for (const previous of approved) {
+            resumePdfClosePrompt(previous.webContents, previous.discarded)
+          }
           quitting = false
+          closeChecking = false
           return
         }
+        approved.push({ ...tab, discarded: decision.discarded })
       }
       closeConfirmed = true
       // Quit cancelled by the guard resumes after the prompts; a plain window
@@ -556,8 +607,8 @@ function registerHomeIpc(): void {
     await writeAppSetting(APP_SETTINGS_PATH(), 'theme', theme)
   })
   ipcMain.handle(HOME_CHANNELS.getPreferences, () => readPreferences())
-  ipcMain.handle(HOME_CHANNELS.setPreferences, (_event: IpcMainInvokeEvent, prefs: unknown) =>
-    writePreferences(prefs),
+  ipcMain.handle(HOME_CHANNELS.setPreferences, (event: IpcMainInvokeEvent, prefs: unknown) =>
+    writePreferences(prefs, event.sender === mainWindow?.webContents),
   )
   ipcMain.handle(HOME_CHANNELS.getAppVersion, () => app.getVersion())
   ipcMain.handle(HOME_CHANNELS.getUpdateState, () => getAppUpdateState())
@@ -740,9 +791,21 @@ void app.whenReady().then(async () => {
   // and move the per-document transcript along with it.
   setPdfFileSavedHook((contents, filePath) => {
     const previous = tabManager?.filePathForWebContents(contents.id)
-    tabManager?.setTabFileFor(contents.id, filePath)
-    recordRecent(filePath)
-    if (previous && previous !== filePath) projectFileRenamed(previous, filePath)
+    const errors: string[] = []
+    for (const step of [
+      () => tabManager?.setTabFileFor(contents.id, filePath),
+      () => recordRecent(filePath),
+      () => {
+        if (previous && previous !== filePath) projectFileRenamed(previous, filePath)
+      },
+    ]) {
+      try {
+        step()
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error))
+      }
+    }
+    if (errors.length) throw new Error(errors.join('; '))
   })
   setPdfOpenPathHandler((filePath) => {
     void openDocumentPath(filePath)

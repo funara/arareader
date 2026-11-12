@@ -1,6 +1,6 @@
 {
   "name": "arareader",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "Standalone smart PDF reader and editor",
   "author": "Adhi Rahmadian",

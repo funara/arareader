@@ -76,6 +76,10 @@ export interface ReaderPreferences {
   autosave: boolean
   /** Auto-gather document context on first open to generate AI-tailored recommendations */
   aiAutoSuggestions?: boolean
+  /** Present only after the user explicitly chose the automatic-sharing preference. */
+  aiAutoSuggestionsConsentVersion?: 1
+  /** One-write signal for the main process to accept a deliberate checkbox choice. */
+  aiAutoSuggestionsConsentAction?: boolean
   /** Whether the user has seen or completed the initial onboarding modal */
   onboardingCompleted?: boolean
 }

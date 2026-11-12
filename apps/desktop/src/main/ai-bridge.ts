@@ -150,11 +150,11 @@ const grantedAttachments = new Map<number, Set<string>>()
 const trackedGrantHolders = new Set<number>()
 
 function grantAttachments(sender: WebContents, paths: string[]): void {
-  if (paths.length === 0) return
+  if (paths.length === 0 || sender.isDestroyed()) return
   const set = grantedAttachments.get(sender.id) ?? new Set<string>()
   for (const path of paths) set.add(path)
   grantedAttachments.set(sender.id, set)
-  if (trackedGrantHolders.has(sender.id) || sender.isDestroyed()) return
+  if (trackedGrantHolders.has(sender.id)) return
   trackedGrantHolders.add(sender.id)
   // teardown: a crashed/closed view must not leave grants reachable
   sender.once('destroyed', () => {
@@ -575,9 +575,9 @@ export function registerAiBridge(options: AiBridgeOptions = {}): void {
 
   // ── attachments ──────────────────────────────────────────
 
-  ipcMain.handle(FILES_CHANNELS.pick, async (event): Promise<AttachmentAddResult | null> => {
+  ipcMain.handle(FILES_CHANNELS.pick, async (event, purpose: unknown) => {
     const result = await showOpenDialogWithMemory(dialog, dialogParent(event), {
-      title: 'Add attachment',
+      title: purpose === 'reselect' ? 'Select the original attachment' : 'Add attachment',
       filters: [
         { name: 'Supported files', extensions: [...ATTACHMENT_EXTS] },
         { name: 'All files', extensions: ['*'] },
@@ -599,12 +599,10 @@ export function registerAiBridge(options: AiBridgeOptions = {}): void {
       const list = Array.isArray(paths)
         ? paths.filter((path): path is string => typeof path === 'string' && path !== '')
         : []
-      const collected = await collectAttachments(list)
-      grantAttachments(
-        event.sender,
-        collected.accepted.map((attachment) => attachment.path),
-      )
-      return collected
+      const granted = list.filter((path) => hasAttachmentGrant(event.sender.id, path))
+      const ungranted = list.filter((path) => !hasAttachmentGrant(event.sender.id, path))
+      const collected = await collectAttachments(granted)
+      return { ...collected, ungranted }
     },
   )
 

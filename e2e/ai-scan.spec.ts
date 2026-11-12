@@ -85,6 +85,7 @@ async function makeProfile(
       userPreferences: {
         onboardingCompleted: true,
         aiAutoSuggestions,
+        aiAutoSuggestionsConsentVersion: 1,
         profile: {
           displayName: 'E2E User',
           fullName: 'E2E Test User',

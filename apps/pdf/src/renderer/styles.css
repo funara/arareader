@@ -217,6 +217,38 @@ textarea {
   background-clip: padding-box;
 }
 
+.reader-save-live {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.reader-recovery {
+  position: fixed;
+  z-index: 1000;
+  left: 50%;
+  bottom: 34px;
+  transform: translateX(-50%);
+  max-width: min(600px, calc(100vw - 32px));
+  padding: 12px 16px;
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  box-shadow: var(--popup-shadow);
+}
+
+.reader-recovery p {
+  overflow-wrap: anywhere;
+  margin: 0 0 8px;
+}
+
 .app {
   display: flex;
   flex-direction: column;
@@ -710,6 +742,7 @@ textarea {
 
 .tb-readonly,
 .tb-save-error,
+.tb-operation-error,
 .tb-save-ok,
 .tb-save-pending {
   display: inline-flex;
@@ -729,7 +762,14 @@ textarea {
   border: 1px solid var(--border);
 }
 
-.tb-save-error {
+.tb-save-error,
+.tb-operation-error {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+}
+
+.reader-error-alert {
   color: var(--danger);
   background: var(--danger-bg);
   border: 1px solid var(--danger-border);
@@ -3555,6 +3595,23 @@ textarea {
 
 .pdf-organize-card:disabled {
   cursor: default;
+}
+
+.pdf-organize-card[draggable='true'] {
+  cursor: grab;
+}
+
+.pdf-organize-card[draggable='true']:active {
+  cursor: grabbing;
+}
+
+.pdf-organize-card-dragging {
+  opacity: 0.45;
+}
+
+.pdf-organize-card-drop {
+  outline: 2px dashed var(--accent);
+  outline-offset: 2px;
 }
 
 .pdf-organize-thumb {

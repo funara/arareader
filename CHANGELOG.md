@@ -5,6 +5,24 @@ All notable changes to **ARAReader** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.2.3]
+
+### Added
+
+- **Organize pages:** Drag a page to reorder it across the grid, or use the accessible move controls. Page moves support undo and are saved with the document.
+
+### Changed
+
+- **AI privacy:** Automatic document recommendations are off until explicitly enabled. Attachment access requires a user-authorized file selection.
+- **Reader preferences:** Apply the selected default zoom, sidebar, and autosave settings when reading PDFs.
+- **Keyboard navigation:** Improve focus handling in PDF dialogs, Settings, and the tab strip.
+
+### Fixed
+
+- **Save and close:** Prevent overlapping operations from racing document saves and close prompts; retain a recovery path when a saved document cannot be refreshed.
+- **Web safety:** Pin validated network addresses across requests and redirects, and reject oversized or excessively compressed responses.
+- **Page operations:** Extract and insert pages at their displayed positions after pending page changes are saved.
+
 ## [v0.2.2]
 
 ### Added

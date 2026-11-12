@@ -139,6 +139,35 @@ describe('PDF_TOOLS definitions', () => {
   })
 })
 
+describe('asynchronous edit producer guard', () => {
+  it('holds the edit lease until markup has committed and rejects work when busy', async () => {
+    let finish!: (index: SearchIndex) => void
+    const search = new Promise<SearchIndex>((resolve) => {
+      finish = resolve
+    })
+    let active = 0
+    const deps = makeDeps({
+      searchIndex: () => search,
+      beginEdit: () => {
+        if (active) return null
+        active++
+        return () => {
+          active--
+        }
+      },
+    })
+    const first = executePdfTool(deps, call('markup_text', { query: 'Hello' }))
+    expect(active).toBe(1)
+    const second = await executePdfTool(deps, call('add_note', { page: 1, text: 'note' }))
+    expect(second.isError).toBe(true)
+    expect(deps.addNote).not.toHaveBeenCalled()
+    finish(INDEX)
+    expect((await first).mutated).toBe(true)
+    expect(deps.addMarkup).toHaveBeenCalledOnce()
+    expect(active).toBe(0)
+  })
+})
+
 describe('read_pages', () => {
   it('reads a page range with [Page N] markers', async () => {
     const result = await executePdfTool(makeDeps(), call('read_pages', { start: 1, end: 2 }))

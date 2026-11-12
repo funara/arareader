@@ -43,6 +43,17 @@ async function fileDigest(path: string): Promise<string> {
     .digest('hex')
 }
 
+/** Tests that exercise the initial thumbnail pane opt into that preference explicitly. */
+async function launchWithThumbnails(openFile: string) {
+  const userDataDir = await mkdtemp(join(tmpdir(), 'arareader-pdf-thumbnails-'))
+  await writeFile(
+    join(userDataDir, 'app-settings.json'),
+    JSON.stringify({ userPreferences: { onboardingCompleted: true, defaultSidebar: 'thumbs' } }),
+    'utf8',
+  )
+  return launchApp({ openFile, userDataDir })
+}
+
 /**
  * Real-app smoke of the PDF features: everything that unit tests cannot cover,
  * because none of it has an Electron runtime. The outline round trip is the
@@ -65,7 +76,7 @@ test.describe('pdf features', () => {
     applyOutline(document, [{ title: 'Bookmark', pageIndex: 0 }])
     await writeFile(path, await document.save())
 
-    const launched = await launchApp({ openFile: path })
+    const launched = await launchWithThumbnails(path)
     try {
       const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
       const rail = pdf.locator('.pdf-sidebar-toggle')
@@ -127,6 +138,7 @@ test.describe('pdf features', () => {
       await expect(prompt).toHaveValue('Beta')
       await prompt.fill('Beta Renamed')
       await prompt.press('Enter')
+      await expect(pdf.getByRole('dialog', { name: 'Rename' })).toHaveCount(0)
       await expect(pane.locator('.pdf-outline-row').nth(1)).toContainText('Beta Renamed')
 
       // Delete "Alpha": the row holds the title plus ↑ ↓ ✎ ✕ ＋, addressed by title so button
@@ -194,7 +206,7 @@ test.describe('pdf features', () => {
       // Export embedded images on a no-image document surfaces the guard through the toolbar's
       // save-error badge instead of a dialog
       await pdf.locator('.rb-big[title="Export Embedded Images"]').click()
-      await expect(pdf.locator('.tb-save-error')).toBeVisible({ timeout: 15_000 })
+      await expect(pdf.locator('.reader-error-alert')).toBeVisible({ timeout: 15_000 })
 
       // The accessibility report sits on the home ribbon — switch back, since ribbon tabs
       // unmount their groups
@@ -231,7 +243,7 @@ test('Read mode restores each PDF workspace and Command Center searches the docu
   const bytes = await document.save()
   await writeFile(first, bytes)
   await writeFile(second, bytes)
-  const launched = await launchApp({ openFile: first })
+  const launched = await launchWithThumbnails(first)
   try {
     const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
     const host = launched.page
@@ -1117,6 +1129,8 @@ test.describe('direct content editing', () => {
       await block.click()
       await expect(editor).toHaveValue('Applied text')
       await pdf.locator('.pdf-content-toolbar button', { hasText: 'Cancel' }).click()
+      await pdf.locator('.qa-btn[aria-label="Save"]').click()
+      await expect(pdf.locator('.tb-save-pending')).toHaveCount(0)
     } finally {
       await closeReader(launched)
     }
@@ -1275,7 +1289,7 @@ test.describe('view modes', () => {
     await writeTestPdf(path, 3, 'Hello world')
     await writeTestPdf(second, 1)
 
-    const launched = await launchApp({ openFile: path })
+    const launched = await launchWithThumbnails(path)
     const { app, page } = launched
     const crashes: string[] = []
     page.on('pageerror', (error) => crashes.push(String(error)))
@@ -1477,7 +1491,7 @@ test.describe('organize, palette and external rebuilds', () => {
     const path = join(dir, 'document.pdf')
     await writeTestPdf(path, 1)
 
-    const launched = await launchApp({ openFile: path })
+    const launched = await launchWithThumbnails(path)
     const { app, page } = launched
     const crashes: string[] = []
     page.on('pageerror', (error) => crashes.push(String(error)))

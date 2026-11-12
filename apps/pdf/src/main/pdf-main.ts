@@ -1,6 +1,6 @@
 import { existsSync, watch } from 'node:fs'
 import type { FSWatcher } from 'node:fs'
-import { readFile, unlink, writeFile } from 'node:fs/promises'
+import { readFile, unlink } from 'node:fs/promises'
 import { dirname, join, basename, extname } from 'node:path'
 import { BrowserWindow, WebContentsView, dialog, ipcMain, nativeTheme, shell } from 'electron'
 import type { WebContents } from 'electron'
@@ -387,7 +387,10 @@ const openPathByWc = new Map<number, string>()
 const allowedByWc = new Map<number, Set<string>>()
 /** Unsaved-changes flags mirrored from the renderer; drives the save prompt before closing a tab/window */
 const dirtyByWc = new Set<number>()
+/** Views that have mounted the renderer and can answer the close handshake. */
+const readyByWc = new Set<number>()
 const closeSaveWaiters = new Map<number, (ok: boolean) => void>()
+const closePromptWaiters = new Map<number, (ready: boolean) => void>()
 
 /** One file watcher per view: the path it was granted, the OS handle, and the pending debounce */
 interface ViewWatch {
@@ -481,32 +484,86 @@ export function pdfIsDirty(webContentsId: number): boolean {
 }
 
 /**
- * Close guard for the pdf renderer: true means proceed with closing.
- * Clean → true; dirty → Save / Don't Save / Cancel. On Save, ask the renderer to
- * write to disk and await the result; on failure or timeout stay open (renderer
- * has already shown the error).
+ * Close guard for the PDF renderer. Clean tabs are approved; dirty tabs prompt
+ * for Save / Don't Save / Cancel. `discarded` lets a cancelled whole-window close
+ * preserve a prior Don't Save choice without allowing a later unattended write.
  */
+export interface PdfCloseDecision {
+  approved: boolean
+  discarded: boolean
+}
+
 export async function requestPdfClose(
   contents: WebContents,
   parent?: BrowserWindow | null,
-): Promise<boolean> {
-  if (!dirtyByWc.has(contents.id) || contents.isDestroyed()) return true
-  const options = {
-    type: 'warning' as const,
-    message: tm('closeUnsavedMsg'),
-    detail: tm('closeUnsavedDetail'),
-    buttons: [tm('btnSave'), tm('btnDontSave'), tm('btnCancel')],
-    defaultId: 0,
-    cancelId: 2,
-    noLink: true,
+): Promise<PdfCloseDecision> {
+  if (contents.isDestroyed()) return { approved: true, discarded: false }
+  if (!readyByWc.has(contents.id)) {
+    return { approved: !dirtyByWc.has(contents.id), discarded: false }
   }
-  const { response } =
-    parent && !parent.isDestroyed()
-      ? await dialog.showMessageBox(parent, options)
-      : await dialog.showMessageBox(options)
-  if (response === 2) return false
-  if (response === 1) return true
-  return await requestRendererSave(contents)
+
+  let keepPaused = false
+  try {
+    if (!(await pauseAutosaveAndWait(contents))) return { approved: false, discarded: false }
+    if (contents.isDestroyed() || !dirtyByWc.has(contents.id)) {
+      keepPaused = true
+      return { approved: true, discarded: false }
+    }
+
+    const options = {
+      type: 'warning' as const,
+      message: tm('closeUnsavedMsg'),
+      detail: tm('closeUnsavedDetail'),
+      buttons: [tm('btnSave'), tm('btnDontSave'), tm('btnCancel')],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    }
+    const { response } =
+      parent && !parent.isDestroyed()
+        ? await dialog.showMessageBox(parent, options)
+        : await dialog.showMessageBox(options)
+    if (response === 2) return { approved: false, discarded: false }
+    if (response === 1) {
+      keepPaused = true
+      return { approved: true, discarded: true }
+    }
+    const saved = await requestRendererSave(contents)
+    keepPaused = saved
+    return { approved: saved, discarded: false }
+  } finally {
+    if (!keepPaused) resumePdfClosePrompt(contents)
+  }
+}
+
+/** Resume autosave for tabs approved earlier in a whole-window close that is later cancelled. */
+export function resumePdfClosePrompt(contents: WebContents, discardAutosave = false): void {
+  if (contents.isDestroyed()) return
+  try {
+    contents.send(PDF_CHANNELS.closePromptChanged, false, discardAutosave)
+  } catch {
+    /* The view can be torn down between isDestroyed() and send(). */
+  }
+}
+
+function pauseAutosaveAndWait(contents: WebContents): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      closePromptWaiters.delete(contents.id)
+      resolve(false)
+    }, 120_000)
+    closePromptWaiters.set(contents.id, (ready) => {
+      clearTimeout(timer)
+      resolve(ready)
+    })
+    try {
+      contents.send(PDF_CHANNELS.closePromptChanged, true)
+    } catch {
+      clearTimeout(timer)
+      closePromptWaiters.delete(contents.id)
+      resolve(false)
+    }
+  })
 }
 
 function requestRendererSave(contents: WebContents): Promise<boolean> {
@@ -561,14 +618,19 @@ function registerPdfIpc(): void {
     const target = typeof request.targetPath === 'string' ? request.targetPath : path
     try {
       await savePdfToPath(path, target, request)
-      if (typeof request.targetPath === 'string' && request.targetPath !== path) {
-        // Save As wrote to a new path: the host retitles the tab and records the recents entry
-        pdfFileSavedHook?.(e.sender, request.targetPath)
-      }
-      return { ok: true }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
+    if (typeof request.targetPath === 'string' && request.targetPath !== path) {
+      // The view may have been destroyed while the write was in flight.
+      if (openPathByWc.has(e.sender.id)) openPathByWc.set(e.sender.id, request.targetPath)
+      try {
+        pdfFileSavedHook?.(e.sender, request.targetPath)
+      } catch (err) {
+        return { ok: true, warning: err instanceof Error ? err.message : String(err) }
+      }
+    }
+    return { ok: true }
   })
 
   ipcMain.handle(
@@ -584,7 +646,7 @@ function registerPdfIpc(): void {
         defaultPath: suggested.toLowerCase().endsWith('.pdf') ? suggested : `${suggested}.pdf`,
         filters: [{ name: tm('filterPdf'), extensions: ['pdf'] }],
       })
-      if (picked.canceled || !picked.filePath) return null
+      if (picked.canceled || !picked.filePath || e.sender.isDestroyed()) return null
       // A bare name the user typed does not always get the extension appended; the grant below
       // must cover exactly the path that is returned
       const target = picked.filePath.toLowerCase().endsWith('.pdf')
@@ -618,7 +680,7 @@ function registerPdfIpc(): void {
       if (picked.canceled || !picked.filePath) return { ok: true, canceled: true }
       try {
         const bytes = await extractPagesBytes(new Uint8Array(await readFile(path)), pages)
-        await writeFile(picked.filePath, bytes)
+        await atomicWriteFile(picked.filePath, bytes)
         return { ok: true, savedPath: picked.filePath }
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -1060,6 +1122,7 @@ function registerPdfIpc(): void {
     },
   )
   ipcMain.on(PDF_CHANNELS.dirtyChanged, (e, dirty: unknown) => {
+    readyByWc.add(e.sender.id)
     if (dirty === true) dirtyByWc.add(e.sender.id)
     else dirtyByWc.delete(e.sender.id)
   })
@@ -1068,6 +1131,12 @@ function registerPdfIpc(): void {
     const waiter = closeSaveWaiters.get(e.sender.id)
     closeSaveWaiters.delete(e.sender.id)
     waiter?.(ok === true)
+  })
+
+  ipcMain.on(PDF_CHANNELS.closePromptReady, (e) => {
+    const waiter = closePromptWaiters.get(e.sender.id)
+    closePromptWaiters.delete(e.sender.id)
+    waiter?.(true)
   })
 
   // Language channel shared with markdown and other modules (all use 'app:get-language'
@@ -1085,6 +1154,9 @@ function grantAndTrack(wc: WebContents, openPath?: string | null): void {
     openPathByWc.set(wcId, openPath)
     allowedByWc.set(wcId, new Set([openPath]))
   }
+  wc.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
+    if (isMainFrame) readyByWc.delete(wcId)
+  })
   // External links inside the PDF (Link annots with target=_blank) go to the system browser
   wc.setWindowOpenHandler(({ url }) => {
     const target = safeExternalUrl(url)
@@ -1095,9 +1167,12 @@ function grantAndTrack(wc: WebContents, openPath?: string | null): void {
     openPathByWc.delete(wcId)
     allowedByWc.delete(wcId)
     dirtyByWc.delete(wcId)
+    readyByWc.delete(wcId)
     closeWatch(wcId)
     closeSaveWaiters.get(wcId)?.(false)
     closeSaveWaiters.delete(wcId)
+    closePromptWaiters.get(wcId)?.(false)
+    closePromptWaiters.delete(wcId)
   })
 }
 

@@ -215,6 +215,9 @@
   color: var(--tb-text);
   cursor: pointer;
   flex-shrink: 0;
+  font: inherit;
+  text-align: left;
+  appearance: none;
   transition:
     background-color 120ms ease,
     color 120ms ease,
@@ -269,7 +272,8 @@
   z-index: 2;
 }
 
-.tab-item:focus-visible {
+.tab-item:focus-visible,
+.tab-select:focus-visible {
   outline: 2px solid var(--tb-accent);
   outline-offset: -2px;
 }
@@ -295,6 +299,22 @@
 .tab-item.active .tab-icon,
 .tab-item:hover .tab-icon {
   color: var(--tb-text-active);
+}
+
+.tab-select {
+  display: inline-flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  gap: 7px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .tab-title {

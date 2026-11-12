@@ -3,6 +3,30 @@ import { useEffect, useRef } from 'react'
 /** Same cadence as the Docs autosave (30s tick + save on window blur) */
 export const AUTOSAVE_INTERVAL_MS = 30_000
 
+export interface AutosaveEligibility {
+  enabled: boolean
+  savedOnce: boolean
+  dirty: boolean
+  saving: boolean
+  hasPath: boolean
+  readOnly: boolean
+  pendingDecision: boolean
+  closeGuardActive: boolean
+}
+
+export function isAutosaveAllowed(state: AutosaveEligibility): boolean {
+  return (
+    state.enabled &&
+    state.savedOnce &&
+    state.dirty &&
+    !state.saving &&
+    state.hasPath &&
+    !state.readOnly &&
+    !state.pendingDecision &&
+    !state.closeGuardActive
+  )
+}
+
 /**
  * Autosave scheduling (Docs strategy): calls `save` every `intervalMs` and whenever
  * the window loses focus, but only while `shouldSave()` reports pending changes.

@@ -59,6 +59,13 @@ const api: PdfApi = {
     return () => ipcRenderer.removeListener(PDF_CHANNELS.closeSaveRequest, listener)
   },
   sendCloseSaveResult: (ok) => ipcRenderer.send(PDF_CHANNELS.closeSaveResult, ok),
+  onClosePromptChanged: (handler) => {
+    const listener = (_e: Electron.IpcRendererEvent, active: boolean, discardAutosave = false) =>
+      handler(active, discardAutosave)
+    ipcRenderer.on(PDF_CHANNELS.closePromptChanged, listener)
+    return () => ipcRenderer.removeListener(PDF_CHANNELS.closePromptChanged, listener)
+  },
+  sendClosePromptReady: () => ipcRenderer.send(PDF_CHANNELS.closePromptReady),
   getLanguage: () => ipcRenderer.invoke(PDF_CHANNELS.getLanguage),
   onLanguageChanged: (handler) => {
     const listener = (_e: Electron.IpcRendererEvent, lang: Lang) => handler(lang)
@@ -87,7 +94,7 @@ const api: PdfApi = {
     return () => ipcRenderer.removeListener(AI_CHANNELS.streamChunk, listener)
   },
   aiChat: (request) => ipcRenderer.invoke(AI_CHANNELS.chat, request),
-  pickAttachments: () => ipcRenderer.invoke(FILES_CHANNELS.pick),
+  pickAttachments: (purpose) => ipcRenderer.invoke(FILES_CHANNELS.pick, purpose),
   addAttachmentPaths: (paths) => ipcRenderer.invoke(FILES_CHANNELS.add, paths),
   addPastedImage: (data, ext) => ipcRenderer.invoke(FILES_CHANNELS.addPastedImage, data, ext),
   readAttachment: (path, offset, maxChars) =>

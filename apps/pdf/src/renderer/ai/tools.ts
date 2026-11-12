@@ -56,6 +56,7 @@ export interface PdfSkillDeps {
   /** Original page number of the currently visible page (1-based) */
   currentPage(): number
   readOnly(): boolean
+  beginEdit?(): (() => void) | null
   outline(): OutlineNode[] | null
   searchIndex(): Promise<SearchIndex> | null
   isDeleted(origIdx: number): boolean
@@ -846,6 +847,28 @@ async function setMetadataTool(
 }
 
 export async function executePdfTool(
+  deps: PdfSkillDeps,
+  call: AgentToolCall,
+): Promise<ToolExecution> {
+  const mutating = [
+    'fill_form_field',
+    'rotate_page',
+    'delete_page',
+    'markup_text',
+    'add_note',
+    'edit_text_block',
+    'set_metadata',
+  ].includes(call.name)
+  const release = mutating && deps.beginEdit ? deps.beginEdit() : undefined
+  if (release === null) return err('A file operation is in progress. Please retry.', call.name)
+  try {
+    return await executePdfToolInner(deps, call)
+  } finally {
+    release?.()
+  }
+}
+
+async function executePdfToolInner(
   deps: PdfSkillDeps,
   call: AgentToolCall,
 ): Promise<ToolExecution> {

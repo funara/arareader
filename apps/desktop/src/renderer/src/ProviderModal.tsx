@@ -265,7 +265,7 @@ const DEFAULT_PREFS: ReaderPreferences = {
   defaultZoom: 'fit-width',
   defaultSidebar: 'none',
   autosave: false,
-  aiAutoSuggestions: true,
+  aiAutoSuggestions: false,
   onboardingCompleted: false,
 }
 
@@ -311,6 +311,8 @@ export function ProviderModal({
   const currentRef = useRef<AiSettings | null>(null)
   const apiKeyInputRef = useRef<HTMLInputElement>(null)
   const modelComboRef = useRef<HTMLDivElement>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
 
   // User Preferences (Profile, E-Sign, Reader Defaults)
   const [prefs, setPrefs] = useState<ReaderPreferences>(DEFAULT_PREFS)
@@ -411,6 +413,50 @@ export function ProviderModal({
     }
   }, [onClose, modelMenuOpen])
 
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (!dialog) return
+    const previousFocus =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const focusableElements = () =>
+      Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => element.tabIndex >= 0 && element.getClientRects().length > 0)
+    closeButtonRef.current?.focus()
+
+    const trapTab = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return
+      const focusable = focusableElements()
+      if (focusable.length === 0) {
+        event.preventDefault()
+        dialog.focus()
+        return
+      }
+      const first = focusable[0]!
+      const last = focusable[focusable.length - 1]!
+      if (
+        event.shiftKey &&
+        (document.activeElement === first || !dialog.contains(document.activeElement))
+      ) {
+        event.preventDefault()
+        last.focus()
+      } else if (
+        !event.shiftKey &&
+        (document.activeElement === last || !dialog.contains(document.activeElement))
+      ) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', trapTab)
+    return () => {
+      document.removeEventListener('keydown', trapTab)
+      if (previousFocus?.isConnected) previousFocus.focus()
+    }
+  }, [])
+
   const googleModels = useMemo(() => {
     const known: string[] = [...GOOGLE_MODELS]
     const stored = googleModel.trim()
@@ -462,13 +508,11 @@ export function ProviderModal({
     }
   }, [endpoint, apiKey, hasSavedKey, model])
 
-  // Persist user preferences helper
+  // Do not display a preference change as saved until the main process confirms it.
   const persistPrefs = useCallback(async (next: ReaderPreferences) => {
-    setPrefs(next)
-    if (window.reader.setPreferences) {
-      const saved = await window.reader.setPreferences(next)
-      setPrefs(saved)
-    }
+    if (!window.reader.setPreferences) throw new Error('Saving preferences is unavailable.')
+    const saved = await window.reader.setPreferences(next)
+    setPrefs(saved)
   }, [])
 
   // Redraw signature pad when drawing or changing ink color
@@ -738,8 +782,10 @@ export function ProviderModal({
       }}
     >
       <div
+        ref={dialogRef}
         className="ai-provider-modal settings-modal"
         role="dialog"
+        tabIndex={-1}
         aria-modal="true"
         aria-labelledby="ai-provider-title"
         onClick={(event) => event.stopPropagation()}
@@ -749,6 +795,7 @@ export function ProviderModal({
             Settings
           </h3>
           <button
+            ref={closeButtonRef}
             type="button"
             className="ai-provider-close"
             onClick={onClose}
@@ -1535,7 +1582,8 @@ export function ProviderModal({
                       Auto-save PDF annotations &amp; forms
                     </div>
                     <div className="settings-toggle-desc">
-                      Automatically write highlights, notes, and form edits back to the open file.
+                      Auto-save starts only after you explicitly save the PDF once. After that,
+                      edits are written back to the open file on blur or periodically.
                     </div>
                   </div>
                   <input
@@ -1551,18 +1599,28 @@ export function ProviderModal({
                       Adaptive AI recommendations on document open
                     </div>
                     <div className="settings-toggle-desc">
-                      When a PDF opens, send the document name, page count, outline titles, and a
-                      short excerpt from the first pages to your configured AI provider to suggest
-                      tailored prompts in the assistant panel. Off keeps the default suggestions and
-                      sends nothing.
+                      Off by default. When enabled, opening a PDF while AI is connected sends its
+                      filename, page count, up to 10 outline titles, and up to 1,200 characters from
+                      the first 3 pages to your configured AI provider for tailored prompts. This is
+                      separate from chat messages you choose to send.
                     </div>
                   </div>
                   <input
                     type="checkbox"
-                    checked={prefs.aiAutoSuggestions !== false}
+                    disabled={!loaded}
+                    checked={
+                      prefs.aiAutoSuggestionsConsentVersion === 1 &&
+                      prefs.aiAutoSuggestions === true
+                    }
                     onChange={(e) => {
-                      const next = { ...prefs, aiAutoSuggestions: e.target.checked }
-                      void persistPrefs(next)
+                      const next = {
+                        ...prefs,
+                        aiAutoSuggestions: e.target.checked,
+                        aiAutoSuggestionsConsentVersion: 1 as const,
+                        aiAutoSuggestionsConsentAction: true,
+                      }
+                      setError('')
+                      void persistPrefs(next).catch((err: unknown) => setError(errorText(err)))
                     }}
                   />
                 </label>

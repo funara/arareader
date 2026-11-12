@@ -259,25 +259,17 @@ export function TabBar({
         />
         {homeTab && (
           <div className="tab-home-floating">
-            <div
+            <button
+              type="button"
               className={`tab-item tab-home${homeTab.active ? ' active' : ''}`}
-              tabIndex={0}
-              onPointerDown={(event) => {
-                if (event.button === 0 && !homeTab.active) {
-                  void window.readerTabs.activate(homeTab.id)
-                }
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault()
-                  void window.readerTabs.activate(homeTab.id)
-                }
-              }}
+              aria-label={t('home')}
+              aria-pressed={homeTab.active}
+              onClick={() => void window.readerTabs.activate(homeTab.id)}
             >
               <span className="tab-plate" aria-hidden="true" />
               <span className="tab-icon">{TAB_ICON.home}</span>
               <span className="tab-title">{t('home')}</span>
-            </div>
+            </button>
           </div>
         )}
       </div>
@@ -323,10 +315,23 @@ export function TabBar({
             >
               {/* highlight plate behind the content — hover capsule / active surface */}
               <span className="tab-plate" aria-hidden="true" />
-              <span className="tab-icon">{TAB_ICON[tab.kind]}</span>
-              <span className="tab-title">{tab.title}</span>
+              <button
+                type="button"
+                className="tab-select"
+                aria-label={tab.title}
+                aria-pressed={tab.active}
+                title={tab.title}
+                onClick={(event) => {
+                  // Pointer-down activates before a drag; keyboard clicks still activate here.
+                  if (event.detail === 0) void window.readerTabs.activate(tab.id)
+                }}
+              >
+                <span className="tab-icon">{TAB_ICON[tab.kind]}</span>
+                <span className="tab-title">{tab.title}</span>
+              </button>
               {tab.closable && (
                 <button
+                  type="button"
                   className="tab-close"
                   title={t('closeTab')}
                   aria-label={t('closeTab')}

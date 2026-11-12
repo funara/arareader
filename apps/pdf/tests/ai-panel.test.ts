@@ -113,7 +113,12 @@ function makeHarness(
   }
 
   const api = {
-    getPreferences: vi.fn(async () => ({ aiAutoSuggestions: false })),
+    getPreferences: vi.fn(
+      async (): Promise<{
+        aiAutoSuggestions: boolean
+        aiAutoSuggestionsConsentVersion?: 1
+      }> => ({ aiAutoSuggestions: false }),
+    ),
     aiChat: vi.fn(async () => ({ ok: true, content: '[]' })),
     getAiSettings: vi.fn<() => Promise<unknown>>(async () => READY_SETTINGS),
     onAiSettingsChanged: vi.fn(() => () => {}),
@@ -140,14 +145,14 @@ function makeHarness(
     onLanguageChanged: vi.fn(() => () => {}),
     pickAttachments: vi.fn<() => Promise<unknown>>(async () => null),
     addAttachmentPaths: vi.fn<() => Promise<unknown>>(async () => ({ accepted: [], rejected: [] })),
-    addPastedImage: vi.fn(async () => ({ accepted: [], rejected: [] })),
+    addPastedImage: vi.fn<() => Promise<unknown>>(async () => ({ accepted: [], rejected: [] })),
     readAttachment: vi.fn(async () => ({ ok: false, error: 'not used' })),
     readAttachmentImage: vi.fn<() => Promise<unknown>>(async () => ({
       ok: true,
       base64: 'AAAA',
       mime: 'image/png',
     })),
-    getPathForFile: vi.fn(() => ''),
+    getPathForFile: vi.fn((_file: File) => ''),
     configureAi: vi.fn(async () => {}),
   }
 
@@ -431,7 +436,10 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
     const harness = makeHarness({
       history: [message({ seq: 0, role: 'user', text: 'previous question' })],
     })
-    harness.api.getPreferences.mockResolvedValue({ aiAutoSuggestions: true })
+    harness.api.getPreferences.mockResolvedValue({
+      aiAutoSuggestions: true,
+      aiAutoSuggestionsConsentVersion: 1,
+    })
     vi.spyOn(harness.deps, 'doc').mockReturnValue({
       numPages: 1,
       getPage: async () => ({
@@ -675,6 +683,296 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
     // The original attachment is gone: the panel says so and sends nothing
     expect(harness.requests).toHaveLength(1)
     expect(container.textContent).toContain('original attachment is no longer available')
+  })
+
+  it.each([
+    ['cancelled', null],
+    ['wrong file', { accepted: [{ ...IMAGE, path: '/tmp/other.png' }], rejected: [] }],
+    ['invalid file', { accepted: [], rejected: ['unreadable'] }],
+  ])('does not send a retry when reselection is %s', async (_case, selection) => {
+    const harness = makeHarness()
+    harness.api.pickAttachments
+      .mockResolvedValueOnce({ accepted: [IMAGE], rejected: [] })
+      .mockResolvedValueOnce(selection)
+    harness.api.addAttachmentPaths.mockResolvedValue({
+      accepted: [],
+      rejected: [],
+      ungranted: [IMAGE.path],
+    })
+    harness.scripts.push((emit) => emit.error('network down'))
+    await mount(harness)
+    await clickLabel('Attach a file')
+    await send('describe this')
+    await clickLabel('Retry')
+    expect(harness.api.pickAttachments).toHaveBeenCalledTimes(2)
+    expect(harness.requests).toHaveLength(1)
+    expect(container.textContent).toContain('original attachment is no longer available')
+  })
+
+  it('reselects the original after a view loses its grant before retrying', async () => {
+    const harness = makeHarness()
+    harness.api.pickAttachments.mockResolvedValue({ accepted: [IMAGE], rejected: [] })
+    harness.api.addAttachmentPaths.mockResolvedValue({
+      accepted: [],
+      rejected: [],
+      ungranted: [IMAGE.path],
+    })
+    harness.scripts.push((emit) => emit.error('network down'))
+    harness.scripts.push((emit) => emit.done())
+    await mount(harness)
+    await clickLabel('Attach a file')
+    await send('describe this')
+    await clickLabel('Retry')
+    expect(harness.api.pickAttachments).toHaveBeenCalledTimes(2)
+    expect(harness.requests).toHaveLength(2)
+    expect(harness.requests[1]!.messages[0]).toMatchObject({
+      role: 'user',
+      images: [{ base64: 'AAAA', mime: 'image/png' }],
+    })
+  })
+
+  it('never sends a retry without its original image when the image read fails', async () => {
+    const harness = makeHarness()
+    harness.api.pickAttachments.mockResolvedValue({ accepted: [IMAGE], rejected: [] })
+    harness.api.addAttachmentPaths.mockResolvedValue({ accepted: [IMAGE], rejected: [] })
+    harness.scripts.push((emit) => emit.error('network down'))
+    await mount(harness)
+    await clickLabel('Attach a file')
+    await send('describe this')
+    harness.api.readAttachmentImage.mockResolvedValue({ ok: false, error: 'unreadable' })
+    await clickLabel('Retry')
+    expect(harness.requests).toHaveLength(1)
+    expect(container.textContent).toContain('unreadable')
+  })
+
+  it.each(['drop', 'paste'])(
+    'requires a matching picker selection for file-backed %s',
+    async (kind) => {
+      const harness = makeHarness()
+      harness.api.getPathForFile.mockReturnValue(IMAGE.path)
+      harness.api.pickAttachments.mockResolvedValueOnce(null).mockResolvedValueOnce({
+        accepted: [IMAGE],
+        rejected: [],
+      })
+      await mount(harness)
+      const file = new File(['synthetic'], 'pic.png', { type: 'image/png' })
+      const dispatch = async (): Promise<void> => {
+        const event = new Event(kind, { bubbles: true, cancelable: true })
+        Object.defineProperty(event, kind === 'drop' ? 'dataTransfer' : 'clipboardData', {
+          value: { files: [file] },
+        })
+        const target = kind === 'drop' ? container.querySelector('.copilot') : composer()
+        expect(target).not.toBeNull()
+        await act(async () => {
+          target!.dispatchEvent(event)
+        })
+        await flush()
+      }
+      await dispatch()
+      expect(harness.api.pickAttachments).toHaveBeenCalledTimes(1)
+      expect(container.querySelector('.ai-attachment-thumb')).toBeNull()
+      expect(harness.api.addAttachmentPaths).not.toHaveBeenCalled()
+      await dispatch()
+      expect(container.querySelector('.ai-attachment-thumb')).not.toBeNull()
+      expect(harness.api.addAttachmentPaths).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(['drop', 'paste'])(
+    'attaches the first picker-validated file from a mixed %s and reports ignored files',
+    async (kind) => {
+      const harness = makeHarness()
+      const second = { ...IMAGE, path: '/tmp/second.png', name: 'second.png' }
+      harness.api.getPathForFile.mockImplementation((file) => `/tmp/${file.name}`)
+      // The picker can return a different order, and can reject unsupported selections.
+      harness.api.pickAttachments.mockResolvedValue({
+        accepted: [second, IMAGE],
+        rejected: ['bad.bin: unsupported file type .bin'],
+      })
+      await mount(harness)
+      const files = [
+        new File(['bad'], 'bad.bin'),
+        new File(['first'], 'pic.png', { type: 'image/png' }),
+        new File(['second'], 'second.png', { type: 'image/png' }),
+      ]
+      const event = new Event(kind, { bubbles: true, cancelable: true })
+      Object.defineProperty(event, kind === 'drop' ? 'dataTransfer' : 'clipboardData', {
+        value: { files },
+      })
+      const target = kind === 'drop' ? container.querySelector('.copilot') : composer()
+      await act(async () => target!.dispatchEvent(event))
+      await flush()
+      expect(container.querySelector('.ai-attachment-thumb')?.getAttribute('title')).toBe(
+        IMAGE.path,
+      )
+      expect(container.querySelectorAll('.ai-attachment-thumb')).toHaveLength(1)
+      expect(container.textContent).toContain('bad.bin: unsupported file type')
+      expect(container.textContent).toContain('other files were ignored')
+      expect(harness.api.addAttachmentPaths).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(['drop', 'paste'])(
+    'accepts one matching selection from a mixed %s but rejects a mismatched picker',
+    async (kind) => {
+      const harness = makeHarness()
+      harness.api.getPathForFile.mockImplementation((file) => `/tmp/${file.name}`)
+      harness.api.pickAttachments
+        .mockResolvedValueOnce({ accepted: [{ ...IMAGE, path: '/tmp/other.png' }], rejected: [] })
+        .mockResolvedValueOnce({ accepted: [IMAGE], rejected: [] })
+      await mount(harness)
+      const files = [new File(['bad'], 'bad.bin'), new File(['ok'], 'pic.png')]
+      const dispatch = async (): Promise<void> => {
+        const event = new Event(kind, { bubbles: true, cancelable: true })
+        Object.defineProperty(event, kind === 'drop' ? 'dataTransfer' : 'clipboardData', {
+          value: { files },
+        })
+        const target = kind === 'drop' ? container.querySelector('.copilot') : composer()
+        await act(async () => target!.dispatchEvent(event))
+        await flush()
+      }
+      await dispatch()
+      expect(container.querySelector('.ai-attachment-thumb')).toBeNull()
+      expect(container.textContent).toContain('No transferred file was attached')
+      await dispatch()
+      expect(container.querySelector('.ai-attachment-thumb')?.getAttribute('title')).toBe(
+        IMAGE.path,
+      )
+      expect(container.textContent).toContain('other files were ignored')
+      expect(harness.api.addAttachmentPaths).not.toHaveBeenCalled()
+    },
+  )
+
+  it('keeps a delayed picker result notice visible for its full timeout', async () => {
+    const harness = makeHarness()
+    let finish!: (result: unknown) => void
+    harness.api.getPathForFile.mockImplementation((file) => `/tmp/${file.name}`)
+    harness.api.pickAttachments.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        }),
+    )
+    await mount(harness)
+    vi.useFakeTimers()
+    try {
+      const event = new Event('drop', { bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'dataTransfer', {
+        value: { files: [new File(['a'], 'pic.png'), new File(['b'], 'bad.bin')] },
+      })
+      await act(async () => {
+        container.querySelector('.copilot')!.dispatchEvent(event)
+      })
+      await act(async () => {
+        vi.advanceTimersByTime(4900)
+        finish({ accepted: [IMAGE], rejected: [] })
+        await Promise.resolve()
+      })
+      expect(container.textContent).toContain('other files were ignored')
+      await act(async () => {
+        vi.advanceTimersByTime(200)
+      })
+      expect(container.textContent).toContain('other files were ignored')
+      await act(async () => {
+        vi.advanceTimersByTime(4800)
+      })
+      expect(container.textContent).not.toContain('other files were ignored')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('matches selected files across an intervening rejected pathless paste item', async () => {
+    const harness = makeHarness()
+    harness.api.getPathForFile.mockImplementation((file) =>
+      file.name === 'middle.bin' ? '' : `/tmp/${file.name}`,
+    )
+    harness.api.pickAttachments.mockResolvedValue({ accepted: [IMAGE], rejected: [] })
+    harness.api.addPastedImage.mockResolvedValue({
+      accepted: [],
+      rejected: ['Unsupported clipboard data'],
+    })
+    await mount(harness)
+    const middle = new File(['bad'], 'middle.bin')
+    Object.defineProperty(middle, 'arrayBuffer', { value: async () => new ArrayBuffer(3) })
+    const event = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(event, 'clipboardData', {
+      value: { files: [new File(['bad'], 'bad.bin'), middle, new File(['ok'], 'pic.png')] },
+    })
+    await act(async () => composer().dispatchEvent(event))
+    await flush()
+    expect(container.querySelector('.ai-attachment-thumb')?.getAttribute('title')).toBe(IMAGE.path)
+    expect(container.textContent).toContain('Unsupported clipboard data')
+    expect(harness.api.pickAttachments).toHaveBeenCalledTimes(1)
+    expect(harness.api.addAttachmentPaths).not.toHaveBeenCalled()
+  })
+
+  it('skips rejected pathless paste data and only saves the first valid bitmap', async () => {
+    const harness = makeHarness()
+    harness.api.addPastedImage
+      .mockResolvedValueOnce({
+        accepted: [],
+        rejected: ['Clipboard data is not a supported image'],
+      })
+      .mockResolvedValueOnce({ accepted: [IMAGE], rejected: [] })
+    await mount(harness)
+    const files = [
+      new File(['bad'], 'bad.bin'),
+      new File(['first'], 'pic.png', { type: 'image/png' }),
+      new File(['second'], 'second.png', { type: 'image/png' }),
+    ]
+    for (const file of files) {
+      Object.defineProperty(file, 'arrayBuffer', { value: async () => new ArrayBuffer(3) })
+    }
+    const event = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(event, 'clipboardData', { value: { files } })
+    await act(async () => composer().dispatchEvent(event))
+    await flush()
+    expect(harness.api.addPastedImage).toHaveBeenCalledTimes(2)
+    expect(container.querySelectorAll('.ai-attachment-thumb')).toHaveLength(1)
+    expect(container.textContent).toContain('Clipboard data is not a supported image')
+    expect(container.textContent).toContain('other files were ignored')
+  })
+
+  it('continues to a bitmap when a file-backed paste is rejected by the picker', async () => {
+    const harness = makeHarness()
+    harness.api.getPathForFile.mockImplementation((file) =>
+      file.name === 'bad.bin' ? '/tmp/bad.bin' : '',
+    )
+    harness.api.pickAttachments.mockResolvedValue({
+      accepted: [],
+      rejected: ['bad.bin: unsupported file type .bin'],
+    })
+    harness.api.addPastedImage.mockResolvedValue({ accepted: [IMAGE], rejected: [] })
+    await mount(harness)
+    const bitmap = new File(['image'], 'pic.png', { type: 'image/png' })
+    Object.defineProperty(bitmap, 'arrayBuffer', { value: async () => new ArrayBuffer(3) })
+    const event = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(event, 'clipboardData', {
+      value: { files: [new File(['bad'], 'bad.bin'), bitmap] },
+    })
+    await act(async () => composer().dispatchEvent(event))
+    await flush()
+    expect(container.querySelectorAll('.ai-attachment-thumb')).toHaveLength(1)
+    expect(container.textContent).toContain('bad.bin: unsupported file type')
+    expect(container.textContent).toContain('other files were ignored')
+  })
+
+  it('preserves clipboard bitmap paste without a local path', async () => {
+    const harness = makeHarness()
+    harness.api.addPastedImage.mockResolvedValue({ accepted: [IMAGE], rejected: [] })
+    await mount(harness)
+    const file = new File(['synthetic'], 'pic.png', { type: 'image/png' })
+    Object.defineProperty(file, 'arrayBuffer', { value: async () => new ArrayBuffer(3) })
+    const event = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(event, 'clipboardData', { value: { files: [file] } })
+    await act(async () => {
+      composer().dispatchEvent(event)
+    })
+    await flush()
+    expect(harness.api.addPastedImage).toHaveBeenCalledTimes(1)
+    expect(harness.api.pickAttachments).not.toHaveBeenCalled()
+    expect(container.querySelector('.ai-attachment-thumb')).not.toBeNull()
   })
 
   it('invalidates a delayed history load when the user starts a fresh conversation', async () => {

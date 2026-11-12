@@ -58,6 +58,8 @@ export const PDF_CHANNELS = {
   setSpread: 'pdf:set-spread',
   closeSaveRequest: 'pdf:close-save-request',
   closeSaveResult: 'pdf:close-save-result',
+  closePromptChanged: 'pdf:close-prompt-changed',
+  closePromptReady: 'pdf:close-prompt-ready',
   getLanguage: 'app:get-language',
   languageChanged: 'app:language-changed',
   getPreferences: 'home:get-preferences',
@@ -95,6 +97,10 @@ export interface SharedUserPreferences {
   autosave: boolean
   /** Auto-gather document context on first open to generate AI-tailored recommendations */
   aiAutoSuggestions?: boolean
+  /** Present only after the user explicitly chose the automatic-sharing preference. */
+  aiAutoSuggestionsConsentVersion?: 1
+  /** One-write signal for the main process to accept a deliberate checkbox choice. */
+  aiAutoSuggestionsConsentAction?: boolean
   /** Whether the user has seen or completed the initial onboarding modal */
   onboardingCompleted?: boolean
 }
@@ -321,7 +327,7 @@ export interface SavePdfRequest {
   metadata?: MetadataInput
 }
 
-export type SavePdfResult = { ok: true } | { ok: false; error: string }
+export type SavePdfResult = { ok: true; warning?: string } | { ok: false; error: string }
 
 /** Extract pages into a new PDF: main process shows a save dialog; cancel returns canceled */
 export interface ExtractPagesRequest {
@@ -498,6 +504,8 @@ export interface AttachmentAddResult {
   accepted: AttachmentMeta[]
   /** per-file rejection messages (too large / unsupported type / unreadable) */
   rejected: string[]
+  /** Paths requiring a fresh user selection during revalidation. */
+  ungranted?: string[]
 }
 
 export interface AttachmentReadResult {
@@ -584,6 +592,9 @@ export interface PdfApi {
   /** Main process picked "Save" in the close prompt → renderer saves and replies via sendCloseSaveResult */
   onCloseSaveRequest(handler: () => void): () => void
   sendCloseSaveResult(ok: boolean): void
+  /** Main-process close confirmation pauses automatic saves until the view is released. */
+  onClosePromptChanged(handler: (active: boolean, discardAutosave: boolean) => void): () => void
+  sendClosePromptReady(): void
   getLanguage(): Promise<Lang>
   onLanguageChanged(handler: (lang: Lang) => void): () => void
   getPreferences?: () => Promise<SharedUserPreferences>
@@ -599,8 +610,8 @@ export interface PdfApi {
   onAiStream(handler: (chunk: AiStreamChunk) => void): () => void
   aiChat?: (request: { system: string; user: string }) => Promise<AiChatResponse>
   /** chat attachments: file picker (multi-select); null when the user cancels */
-  pickAttachments(): Promise<AttachmentAddResult | null>
-  /** validate dropped/pasted paths against the grant model and return attachment metadata */
+  pickAttachments(purpose?: 'reselect'): Promise<AttachmentAddResult | null>
+  /** Revalidate paths already granted to this view; never grants a new path. */
   addAttachmentPaths(paths: string[]): Promise<AttachmentAddResult>
   /** persist a pasted clipboard image (no local path) to a temp file and add it as an attachment */
   addPastedImage(data: ArrayBuffer, ext: string): Promise<AttachmentAddResult>

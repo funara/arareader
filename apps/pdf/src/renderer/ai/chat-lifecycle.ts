@@ -423,8 +423,8 @@ export function mergeIntoHistory(
 }
 
 /**
- * Attachment paths a retry has to re-grant and re-send. Empty when the original
- * message carried none (a text-only retry). Re-granting through `files:add`
+ * Attachment paths a retry has to revalidate and re-send. Empty when the original
+ * message carried none (a text-only retry). Revalidation through `files:add`
  * reruns the size/type checks, so a moved or oversized file is refused instead
  * of silently sending a different request.
  */
