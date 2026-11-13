@@ -26,68 +26,6 @@ function HomeIcon() {
   )
 }
 
-function ContinuousGlyph() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <rect x="5.5" y="3.5" width="13" height="4.5" rx="1" />
-      <rect x="5.5" y="9.75" width="13" height="4.5" rx="1" />
-      <rect x="5.5" y="16" width="13" height="4.5" rx="1" />
-    </svg>
-  )
-}
-
-function PagedGlyph() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <rect x="8" y="4.5" width="8" height="15" rx="1" />
-      <path d="M4.5 7 H6.5 M4.5 12 H6.5 M4.5 17 H6.5" />
-    </svg>
-  )
-}
-
-function PageLayoutGlyph({ spread }: { spread: boolean }) {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      aria-hidden="true"
-    >
-      {spread ? (
-        <>
-          <rect x="3" y="5" width="8" height="14" rx="1" />
-          <rect x="13" y="5" width="8" height="14" rx="1" />
-        </>
-      ) : (
-        <rect x="7" y="5" width="10" height="14" rx="1" />
-      )}
-    </svg>
-  )
-}
-
 const TAB_ICON: Record<TabSummary['kind'], ReactElement> = {
   home: <HomeIcon />,
   pdf: <PdfGlyph />,
@@ -366,59 +304,6 @@ export function TabBar({
       </div>
 
       <div className="tab-actions">
-        {activeTab?.kind === 'pdf' && activeTab.reading && (
-          <div className="tab-view-switch" role="group" aria-label={t('viewMode')}>
-            <button
-              type="button"
-              className={`tab-view-btn${activeTab.paged ? '' : ' active'}`}
-              title={t('continuousView')}
-              aria-label={t('continuousView')}
-              aria-pressed={!activeTab.paged}
-              onClick={() => void window.readerTabs.setViewMode(false)}
-            >
-              <ContinuousGlyph />
-            </button>
-            <button
-              type="button"
-              className={`tab-view-btn${activeTab.paged ? ' active' : ''}`}
-              title={t('pagedView')}
-              aria-label={t('pagedView')}
-              aria-pressed={!!activeTab.paged}
-              onClick={() => void window.readerTabs.setViewMode(true)}
-            >
-              <PagedGlyph />
-            </button>
-          </div>
-        )}
-        {activeTab?.kind === 'pdf' && activeTab.reading && (
-          <div className="tab-view-switch" role="group" aria-label={t('pageLayout')}>
-            <button
-              type="button"
-              className={`tab-view-btn${activeTab.spread !== 2 ? ' active' : ''}`}
-              title={t('singlePage')}
-              aria-label={t('singlePage')}
-              aria-pressed={activeTab.spread !== 2}
-              onClick={() => void window.readerTabs.setSpread(1)}
-            >
-              <PageLayoutGlyph spread={false} />
-            </button>
-            <button
-              type="button"
-              className={`tab-view-btn${activeTab.spread === 2 ? ' active' : ''}`}
-              title={t('twoPage')}
-              aria-label={t('twoPage')}
-              aria-pressed={activeTab.spread === 2}
-              onClick={() => void window.readerTabs.setSpread(2)}
-            >
-              <PageLayoutGlyph spread />
-            </button>
-          </div>
-        )}
-        {activeTab?.reading && (
-          <button className="tab-exit-read" onClick={() => void window.readerTabs.exitReadMode()}>
-            {t('exitReadMode')}
-          </button>
-        )}
         <button
           type="button"
           className="tab-theme-btn"

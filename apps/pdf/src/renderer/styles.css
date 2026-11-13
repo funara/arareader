@@ -3348,6 +3348,117 @@ textarea {
   display: none;
 }
 
+.read-toolbar {
+  position: fixed;
+  z-index: 30;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100vw - 24px);
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  box-shadow: var(--popup-shadow);
+  color: var(--text);
+  transition: opacity 180ms ease;
+}
+.read-toolbar.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+.read-toolbar:focus-within {
+  opacity: 1;
+}
+.read-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-inline-end: 6px;
+  border-inline-end: 1px solid var(--border-strong);
+}
+.read-toolbar button {
+  min-width: 34px;
+  height: 36px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.read-toolbar button:hover,
+.read-toolbar button[aria-pressed='true'] {
+  background: var(--active-bg);
+  color: var(--accent);
+}
+.read-toolbar button:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+.read-toolbar :is(button, input):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.read-toolbar input {
+  width: 3em;
+  padding: 5px 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface-subtle);
+  color: var(--text);
+  text-align: center;
+  font: inherit;
+}
+.read-toolbar-total {
+  white-space: nowrap;
+}
+.read-toolbar .read-toolbar-exit {
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-strong);
+}
+.read-toolbar-popup-anchor {
+  position: relative;
+}
+.read-toolbar-popup {
+  position: absolute;
+  bottom: calc(100% + 12px);
+  inset-inline-start: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: max-content;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--popup-shadow);
+}
+.read-toolbar-popup button {
+  text-align: start;
+}
+.read-toolbar-popup hr {
+  width: 100%;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+@media (max-width: 560px) {
+  .read-toolbar {
+    flex-wrap: wrap;
+    justify-content: center;
+    width: max-content;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .read-toolbar {
+    transition: none;
+  }
+}
+
 .status-left {
   display: flex;
   align-items: center;

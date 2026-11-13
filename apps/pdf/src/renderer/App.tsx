@@ -33,6 +33,7 @@ import { LinkLayer } from './LinkLayer'
 import { OutlinePanel } from './OutlinePanel'
 import { CommentsPanel } from './CommentsPanel'
 import { CommandPalette } from './CommandPalette'
+import { ReadModeToolbar } from './ReadModeToolbar'
 import type { PaletteCommand } from './CommandPalette'
 import { OrganizeGrid } from './OrganizeGrid'
 import { useVisibleSet } from './useVisibleSet'
@@ -3536,7 +3537,7 @@ export default function App() {
           else undo()
         } else if (k === 'f') {
           e.preventDefault()
-          if (!readMode) openSearch()
+          openSearch()
         } else if (k === 'p' && !e.shiftKey) {
           e.preventDefault()
           void printDoc()
@@ -3559,7 +3560,8 @@ export default function App() {
       }
       if (e.key === 'Escape') {
         // The palette swallows its own Escape; this covers a grid/dialog opened behind it
-        if (readMode) setReadMode(false)
+        if (readMode && searchOpen) closeSearch()
+        else if (readMode) setReadMode(false)
         else if (paletteOpen) setPaletteOpen(false)
         else if (organizeOpen) setOrganizeOpen(false)
         else if (pendingSign) setPendingSign(null)
@@ -5651,7 +5653,10 @@ export default function App() {
                   onChange={(e) => setSearchQuery(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') searchStep(e.shiftKey ? -1 : 1)
-                    else if (e.key === 'Escape') closeSearch()
+                    else if (e.key === 'Escape') {
+                      e.stopPropagation()
+                      closeSearch()
+                    }
                   }}
                 />
                 <span className="pdf-search-count">
@@ -6200,6 +6205,27 @@ export default function App() {
           </div>
         </div>
       </div>
+      {readMode && status === 'ready' && (
+        <ReadModeToolbar
+          page={currentPage}
+          pageCount={pageCount}
+          scale={scale}
+          viewMode={viewMode}
+          spread={spread}
+          onPage={scrollToPage}
+          onStep={(direction) => scrollToPage(stepPage(visList, spread, currentPage, direction))}
+          onZoomIn={zoomIn}
+          onZoomOut={zoomOut}
+          onFit={(mode) => {
+            fitModeRef.current = mode
+            recomputeFit()
+          }}
+          onViewMode={switchViewMode}
+          onSpread={setSpread}
+          onExit={() => setReadMode(false)}
+          t={t}
+        />
+      )}
       <footer className="status-bar">
         <div className="status-left">
           <span className="status-item">

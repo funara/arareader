@@ -328,8 +328,8 @@ test('Read mode restores each PDF workspace and Command Center searches the docu
       .filter({ hasText: /^Home$/ })
       .click()
     await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
-    await expect(host.locator('.tab-exit-read')).toBeVisible()
-    await host.locator('.tab-exit-read').click()
+    await expect(pdf.getByRole('button', { name: 'Exit Read mode' })).toBeVisible()
+    await pdf.getByRole('button', { name: 'Exit Read mode' }).click()
     await expect(modes.locator('button[title="Select"]')).toHaveAttribute('aria-pressed', 'true')
     await expect(pdf.locator('.pdf-thumb').first()).toBeVisible()
     await expect(pdf.locator('.pdf-sidebar-toggle')).toHaveCount(0)
@@ -365,16 +365,15 @@ test('Read mode restores each PDF workspace and Command Center searches the docu
     await expect(pdf.locator('.status-bar')).toBeHidden()
     await expect(pdf.locator('.pdf-form-input').first()).toBeDisabled()
     await expect(pdf.locator('.pdf-content-block')).toHaveCount(0)
-    await expect(host.locator('.tab-exit-read')).toBeVisible()
+    await expect(pdf.getByRole('button', { name: 'Exit Read mode' })).toBeVisible()
     await pdf.screenshot({ path: screenshotPath('production-read-content') })
     await host.screenshot({ path: screenshotPath('production-read-header') })
 
     await host.evaluate((path) => window.reader.openPath(path), second)
     await expect(host.locator('.tab-item', { hasText: 'second.pdf' })).toBeVisible()
-    await expect(host.locator('.tab-exit-read')).toHaveCount(0)
+    await expect(host.getByRole('button', { name: 'Exit Read mode' })).toHaveCount(0)
     await host.locator('.tab-item', { hasText: 'first.pdf' }).click()
-    await expect(host.locator('.tab-exit-read')).toBeVisible()
-    await host.locator('.tab-exit-read').click()
+    await pdf.getByRole('button', { name: 'Exit Read mode' }).click()
     await expect(pdf.locator('.ribbon')).toBeVisible()
     await expect(pdf.locator('.pdf-form-input').first()).toBeEnabled()
     await expect(pdf.locator('.pdf-content-block').first()).toBeVisible()
@@ -1065,12 +1064,12 @@ for (const kind of ['strokes', 'image'] as const) {
       await pdf.locator('.pdf-toast').getByRole('button', { name: 'Undo' }).click()
       await expect(pdf.locator('.pdf-draw-shape')).toHaveCount(1)
       await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
-      await expect(launched.page.locator('.tab-exit-read')).toBeVisible()
+      await expect(pdf.getByRole('button', { name: 'Exit Read mode' })).toBeVisible()
       await pdf.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z')
       await expect(shape).toHaveCount(1)
       await shape.click({ force: true })
       await expect(pdf.locator('.pdf-del-popup')).toHaveCount(0)
-      await launched.page.locator('.tab-exit-read').click()
+      await pdf.getByRole('button', { name: 'Exit Read mode' }).click()
       await expect(editButton).toHaveAttribute('aria-pressed', 'true')
       await expect(pdf.locator('.tb-save-pending')).toBeVisible()
       await pdf.keyboard.press(process.platform === 'darwin' ? 'Meta+s' : 'Control+s')
@@ -1169,7 +1168,7 @@ test.describe('direct content editing', () => {
       await editor.fill('Edited text')
       await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
       await expect(editor).toHaveCount(0)
-      await expect(page.locator('.tab-exit-read')).toBeVisible()
+      await expect(pdf.getByRole('button', { name: 'Exit Read mode' })).toBeVisible()
       const scroll = pdf.locator('.pdf-scroll')
       await scroll.evaluate((el) => {
         el.scrollTop = el.scrollHeight
@@ -1179,7 +1178,7 @@ test.describe('direct content editing', () => {
         el.scrollTop = 0
       })
       await expect(pdf.locator('.pdf-row').first()).toBeInViewport()
-      await page.locator('.tab-exit-read').click()
+      await pdf.getByRole('button', { name: 'Exit Read mode' }).click()
       await expect(editor).toHaveCount(0)
       await block.click()
       await expect(editor).toHaveValue('Hello world')
@@ -1240,16 +1239,16 @@ test.describe('view modes', () => {
       await pdf.locator('.rb-big[title="Two pages"]').click()
       await expect(dual).toHaveAttribute('aria-pressed', 'true')
       await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
-      await expect(launched.page.getByRole('button', { name: 'Two pages' })).toHaveAttribute(
-        'aria-pressed',
-        'true',
-      )
+      await pdf.locator('.read-toolbar').getByRole('button', { name: 'View mode' }).click()
+      await expect(
+        pdf.locator('.read-toolbar').getByRole('button', { name: 'Two pages' }),
+      ).toHaveAttribute('aria-pressed', 'true')
     } finally {
       await closeReader(launched)
     }
   })
 
-  test('changes the page spread from the Read mode header', async () => {
+  test('changes the page spread from the Read mode toolbar', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'arareader-read-spread-'))
     const path = join(dir, 'document.pdf')
     const second = join(dir, 'second.pdf')
@@ -1259,11 +1258,13 @@ test.describe('view modes', () => {
     try {
       const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
       await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
-      const twoPages = launched.page.getByRole('button', { name: 'Two pages' })
+      const toolbar = pdf.locator('.read-toolbar')
+      await toolbar.getByRole('button', { name: 'View mode' }).click()
+      const twoPages = toolbar.getByRole('button', { name: 'Two pages' })
       await twoPages.click()
       await expect(twoPages).toHaveAttribute('aria-pressed', 'true')
       await expect(pdf.locator('.pdf-row').first().locator('.pdf-page')).toHaveCount(2)
-      const singlePage = launched.page.getByRole('button', { name: 'Single page' })
+      const singlePage = toolbar.getByRole('button', { name: 'Single page' })
       await singlePage.click()
       await expect(singlePage).toHaveAttribute('aria-pressed', 'true')
       await expect(pdf.locator('.pdf-row').first().locator('.pdf-page')).toHaveCount(1)
@@ -1271,10 +1272,10 @@ test.describe('view modes', () => {
       await expect(twoPages).toHaveAttribute('aria-pressed', 'true')
       await launched.page.evaluate((file) => window.reader.openPath(file), second)
       await expect(launched.page.locator('.tab-item', { hasText: 'second.pdf' })).toBeVisible()
-      await expect(twoPages).toHaveCount(0)
+      await expect(launched.page.locator('.tab-view-switch')).toHaveCount(0)
       await launched.page.locator('.tab-item', { hasText: 'document.pdf' }).click()
       await expect(twoPages).toHaveAttribute('aria-pressed', 'true')
-      await launched.page.locator('.tab-exit-read').click()
+      await toolbar.getByRole('button', { name: 'Exit Read mode' }).click()
       await pdf.locator('.ribbon-tab', { hasText: 'View' }).click()
       await expect(pdf.locator('.rb-big[title="Two pages"]')).toHaveClass(/active/)
     } finally {
@@ -1355,11 +1356,12 @@ test.describe('view modes', () => {
       await expect(pdf.locator('.pdf-page:visible')).toHaveAttribute('data-orig-idx', '2')
       await pdf.screenshot({ path: screenshotPath('pdf-view-switch-footer') })
 
-      // Read mode hides the footer; the host header carries the same switch
+      // Read mode hides the footer; the floating toolbar carries the same switch
       await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
-      const headerSwitch = page.locator('.tab-view-switch[aria-label="View mode"]')
-      const headerPaged = headerSwitch.locator('[title="Page by page"]')
-      const headerContinuous = headerSwitch.locator('[title="Continuous"]')
+      const headerSwitch = pdf.locator('.read-toolbar')
+      await headerSwitch.getByRole('button', { name: 'View mode' }).click()
+      const headerPaged = headerSwitch.getByRole('button', { name: 'Page by page' })
+      const headerContinuous = headerSwitch.getByRole('button', { name: 'Continuous' })
       await expect(headerSwitch).toBeVisible()
       await expect(headerPaged).toHaveAttribute('aria-pressed', 'true')
       await page.screenshot({ path: screenshotPath('pdf-view-switch-read-mode') })
@@ -1373,15 +1375,15 @@ test.describe('view modes', () => {
       // Another PDF tab is not in Read mode, so the strip shows no switch for it...
       await page.evaluate((file) => window.reader.openPath(file), second)
       await expect(page.locator('.tab-item', { hasText: 'second.pdf' })).toBeVisible()
-      await expect(headerSwitch).toHaveCount(0)
+      await expect(page.locator('.tab-view-switch')).toHaveCount(0)
       // ...and returning to the reading tab restores its own state
       await page.locator('.tab-item', { hasText: 'document.pdf' }).click()
       await expect(headerSwitch).toBeVisible()
       await expect(headerPaged).toHaveAttribute('aria-pressed', 'true')
 
       // Leaving Read mode returns the footer and ribbon, still page-by-page
-      await page.locator('.tab-exit-read').click()
-      await expect(page.locator('.tab-exit-read')).toHaveCount(0)
+      await headerSwitch.getByRole('button', { name: 'Exit Read mode' }).click()
+      await expect(headerSwitch).toHaveCount(0)
       await expect(pdf.locator('.status-view-switch [title="Page by page"]')).toHaveAttribute(
         'aria-pressed',
         'true',
