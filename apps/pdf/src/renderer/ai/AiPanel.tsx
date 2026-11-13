@@ -15,10 +15,8 @@ import {
   IconBulb,
   IconCheck,
   IconChevronDown,
-  IconClock,
   IconCopy,
   IconFileText,
-  IconNewChat,
   IconSidebarCollapse,
   IconSparkles,
   Markdown,
@@ -1885,35 +1883,19 @@ export function AiPanel({
       />
       <AiPanelHeader
         title="ARA Assistant"
-        onTriggerScan={handleGatherContextClick}
-        isScanning={scanningContext}
-        showTriggerScan={chat.length === 0}
-        triggerScanLabel={
-          scanningContext
-            ? 'Analyzing document context… (click to cancel)'
-            : 'Analyze document context'
+        showNewChat={
+          historyState !== 'ready' ||
+          chat.length > 0 ||
+          busy ||
+          (showHistoric && historicChat.length > 0)
         }
-        showNewChat
-        onNewChat={
-          historyState !== 'ready' || chat.length > 0 || busy
-            ? requestNewChat
-            : () => setShowHistoric((visible) => !visible)
-        }
+        onNewChat={requestNewChat}
+        newChatLabel={t('aiNewChat')}
+        onToggleHistory={() => setShowHistoric((visible) => !visible)}
+        historyLabel={t('aiHistory')}
+        historyExpanded={showHistoric}
         onCollapse={onCollapse}
-        newChatLabel={
-          historyState !== 'ready' || chat.length > 0 || busy ? t('aiNewChat') : t('aiHistory')
-        }
-        actionExpanded={
-          historyState !== 'ready' || chat.length > 0 || busy ? undefined : showHistoric
-        }
         collapseLabel={t('aiCollapsePanel')}
-        newChatIcon={
-          historyState !== 'ready' || chat.length > 0 || busy ? (
-            <IconNewChat size={15} />
-          ) : (
-            <IconClock size={15} />
-          )
-        }
         collapseIcon={<IconSidebarCollapse size={15} />}
         live={busy}
       />

@@ -98,6 +98,11 @@ test.describe('pdf ai history', () => {
       await expect(pdf.locator('.ai-msg-historic')).toHaveCount(2)
       await expect(pdf.locator('.ai-msg-historic').first()).toContainText('old question')
       await expect(panel).toContainText('new question')
+      await expect(pdf.getByRole('button', { name: 'New chat' })).toBeVisible()
+      await expect(pdf.getByRole('button', { name: 'History' })).toBeVisible()
+      await expect(pdf.locator('.ai-panel-header-actions')).not.toContainText(
+        'Analyze document context',
+      )
 
       // The stopped turn keeps its partial text, its completed action and its status
       await expect(pdf.locator('.ai-msg-status')).toHaveText('Stopped')
@@ -148,14 +153,26 @@ test.describe('pdf ai history', () => {
       const history = pdf.getByRole('button', { name: 'History' })
       await expect(history).toBeVisible()
       await expect(history).toHaveAttribute('aria-expanded', 'false')
+      await expect(pdf.getByRole('button', { name: 'New chat' })).toHaveCount(0)
+      await expect(
+        pdf.locator('.ai-panel-header-actions button[aria-label="Analyze document context"]'),
+      ).toHaveCount(0)
       await expect(pdf.locator('.ai-chat > .ai-msg')).toHaveCount(0)
       await history.click()
+      await expect(pdf.getByRole('button', { name: 'New chat' })).toBeVisible()
+      await expect(history).toBeVisible()
       await expect(pdf.locator('.ai-msg-historic')).toHaveCount(4)
       await expect(pdf.locator('.ai-chat')).toContainText('old question')
       await expect(pdf.locator('.ai-chat')).toContainText('new question')
       await pdf.getByRole('button', { name: 'Collapse panel' }).click()
       await pdf.locator('.ai-rail').click()
       await expect(history).toHaveAttribute('aria-expanded', 'true')
+      await expect(pdf.locator('.ai-msg-historic')).toHaveCount(4)
+      await pdf.getByRole('button', { name: 'New chat' }).click()
+      await expect(history).toHaveAttribute('aria-expanded', 'false')
+      await expect(pdf.getByRole('button', { name: 'New chat' })).toHaveCount(0)
+      await expect(pdf.locator('.ai-msg-historic')).toHaveCount(0)
+      await history.click()
       await expect(pdf.locator('.ai-msg-historic')).toHaveCount(4)
       await expect
         .poll(async () => {

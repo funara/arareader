@@ -189,7 +189,7 @@ test.describe('adaptive suggestion scan (R8)', () => {
           pdf
             .locator('.ai-panel-header-actions')
             .getByRole('button', { name: 'Analyze document context' }),
-        ).toBeVisible()
+        ).toHaveCount(0)
         await pdf.getByRole('button', { name: 'History' }).click()
         await expect(pdf.locator('.ai-msg-historic')).toHaveCount(2)
         await pdf.getByRole('button', { name: 'History' }).click()

@@ -11,6 +11,9 @@ export interface AiPanelHeaderProps {
   readonly showNewChat?: boolean | undefined
   readonly newChatIcon?: ReactNode | undefined
   readonly actionExpanded?: boolean | undefined
+  readonly historyLabel?: string | undefined
+  readonly historyExpanded?: boolean | undefined
+  readonly onToggleHistory?: (() => void) | undefined
   readonly collapseIcon?: ReactNode | undefined
   readonly onTriggerScan?: (() => void) | undefined
   readonly isScanning?: boolean | undefined
@@ -35,6 +38,9 @@ export function AiPanelHeader({
   showNewChat = Boolean(onNewChat),
   newChatIcon = <IconNewChat size={15} />,
   actionExpanded,
+  historyLabel = 'History',
+  historyExpanded,
+  onToggleHistory,
   collapseIcon = <IconSidebarCollapse size={15} />,
   onTriggerScan,
   isScanning = false,
@@ -92,6 +98,18 @@ export function AiPanelHeader({
             aria-expanded={actionExpanded}
           >
             {newChatIcon}
+          </button>
+        )}
+        {onToggleHistory && (
+          <button
+            className="ai-header-btn"
+            type="button"
+            onClick={onToggleHistory}
+            title={historyLabel}
+            aria-label={historyLabel}
+            aria-expanded={historyExpanded}
+          >
+            <IconClock size={15} />
           </button>
         )}
         {onCollapse && (
