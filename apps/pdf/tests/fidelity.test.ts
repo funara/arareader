@@ -16,6 +16,7 @@ import type { SavePdfRequest } from '../src/shared/ipc'
 
 const request = (over: Partial<SavePdfRequest> = {}): SavePdfRequest => ({
   path: '/tmp/test.pdf',
+  sourceVersion: 'unused-in-writer-test',
   markups: [],
   drawings: [],
   formValues: [],

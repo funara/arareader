@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { rename, unlink, writeFile } from 'node:fs/promises'
+import { chmod, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 
 /** Transient Windows error codes: antivirus/indexer briefly locks the rename target. */
@@ -33,15 +33,33 @@ export async function renameWithRetry(
 /**
  * Same-dir temp file + rename, so a crash mid-write can't truncate the target.
  * Rename-over-existing can fail under Windows file locks; after retries the
- * error is returned and the original target remains untouched.
+ * error is returned and the original target remains untouched. On POSIX, an
+ * existing target's rwx bits are preserved unless the caller supplies a mode.
  */
-export async function atomicWriteFile(filePath: string, data: Buffer | Uint8Array): Promise<void> {
+export async function atomicWriteFile(
+  filePath: string,
+  data: Buffer | Uint8Array,
+  options: { mode?: number } = {},
+): Promise<void> {
   const tmp = join(
     dirname(filePath),
     `.${basename(filePath)}.${randomBytes(6).toString('hex')}.tmp`,
   )
+  let mode = options.mode
+  if (process.platform !== 'win32' && mode === undefined) {
+    try {
+      mode = (await stat(filePath)).mode & 0o777
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+    }
+  }
   try {
-    await writeFile(tmp, data)
+    if (mode === undefined) {
+      await writeFile(tmp, data)
+    } else {
+      await writeFile(tmp, data, { mode })
+      if (process.platform !== 'win32') await chmod(tmp, mode)
+    }
     await renameWithRetry(tmp, filePath)
   } catch (err) {
     try {

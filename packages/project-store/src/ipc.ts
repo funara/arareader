@@ -85,10 +85,14 @@ export interface StartNewChatResult extends ResolveChatResult {
 export interface RebindChatArgs {
   projectId: string
   tempChatId: string
-  /** Specify the new chatId directly; one of newChatId / newFilePath / sessionId */
+  /** Specify a new chatId directly when the file path is not available. */
   newChatId?: string
-  /** File path where the unsaved session first hit disk: the main process derives the chatId from it and registers fileMap */
+  /** File path where the session first hit disk: the main process derives its chatId and registers fileMap. */
   newFilePath?: string
+  /** Save As from an existing file copies its active history instead of moving the source. */
+  copyToFile?: boolean
+  /** Stable across retries of one Save As history copy. */
+  copyOperationId?: string
   /** Sheets mode: the renderer can't get the path, so it passes sessionId for the main process to look up and rebind */
   sessionId?: string
 }
@@ -129,7 +133,7 @@ export interface ProjectApi {
    * earlier ones stay on disk as the earlier conversation (nothing is deleted).
    */
   startNewChat(args: StartNewChatArgs): Promise<StartNewChatResult>
-  /** Renames the JSONL file (called after the file first hits disk); returns the new projectId/chatId */
+  /** Rebinds a first-save transcript or copies active history for Save As; returns the destination identity. */
   rebindChat(args: RebindChatArgs): Promise<ResolveChatResult>
   // ── P1 extensions ──
   /** Lists all projects (with file count + last active time) */

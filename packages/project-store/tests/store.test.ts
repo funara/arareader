@@ -495,7 +495,7 @@ describe('rebindChat', () => {
     mkdirSync(join(chatsDir, 'merge-target.jsonl'))
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
-      store.rebindChat('default', 'unsaved-failed', 'merge-target')
+      expect(() => store.rebindChat('default', 'unsaved-failed', 'merge-target')).toThrow()
     } finally {
       warn.mockRestore()
     }
@@ -581,7 +581,230 @@ describe('rebindChatToFile', () => {
 })
 
 // ────────────────────────────────────────────────────────────
-// 5c. Stable chatId mapping and rename tracking
+// 5c. Save As copies active history without moving either file's identity
+// ────────────────────────────────────────────────────────────
+
+describe('copyChatToFile', () => {
+  let tmpDir: string
+  let store: ProjectStore
+
+  beforeEach(() => {
+    tmpDir = makeTempDir()
+    store = new ProjectStore(tmpDir)
+    store.ensureDefaultProject()
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('keeps both file histories and boundaries independent after Save As', () => {
+    const sourcePath = '/docs/source.pdf'
+    const targetPath = '/docs/destination.pdf'
+    const source = store.resolveChatForFile(sourcePath)
+    const target = store.resolveChatForFile(targetPath)
+
+    for (const text of ['source-earlier-question', 'source-earlier-answer']) {
+      store.appendChatMessage(source.projectId, source.chatId, {
+        role: text.endsWith('question') ? 'user' : 'assistant',
+        text,
+      })
+    }
+    store.startNewChat(source.projectId, source.chatId)
+    for (const text of ['source-active-question', 'source-active-answer']) {
+      store.appendChatMessage(source.projectId, source.chatId, {
+        role: text.endsWith('question') ? 'user' : 'assistant',
+        text,
+      })
+    }
+
+    for (const text of ['target-earlier-question', 'target-earlier-answer']) {
+      store.appendChatMessage(target.projectId, target.chatId, {
+        role: text.endsWith('question') ? 'user' : 'assistant',
+        text,
+      })
+    }
+    store.startNewChat(target.projectId, target.chatId)
+    for (const text of ['target-active-question', 'target-active-answer']) {
+      store.appendChatMessage(target.projectId, target.chatId, {
+        role: text.endsWith('question') ? 'user' : 'assistant',
+        text,
+      })
+    }
+
+    const rebound = store.copyChatToFile(
+      source.projectId,
+      source.chatId,
+      targetPath,
+      'save-as-copy-1',
+    )
+
+    expect(rebound).toMatchObject({ ...target, boundarySeq: 4 })
+    expect(store.resolveChatForFile(sourcePath)).toEqual({ ...source, boundarySeq: 2 })
+    expect(store.resolveChatForFile(targetPath)).toEqual({ ...target, boundarySeq: 4 })
+    expect(store.loadChat(source.projectId, source.chatId).map((row) => row.text)).toEqual([
+      'source-earlier-question',
+      'source-earlier-answer',
+      'source-active-question',
+      'source-active-answer',
+    ])
+    expect(store.loadChat(target.projectId, target.chatId).map((row) => row.text)).toEqual([
+      'target-earlier-question',
+      'target-earlier-answer',
+      'target-active-question',
+      'target-active-answer',
+      'source-active-question',
+      'source-active-answer',
+    ])
+    expect(JSON.stringify(store.loadChat(target.projectId, target.chatId))).not.toContain('__copy')
+
+    const restarted = new ProjectStore(tmpDir)
+    const reopenedSource = restarted.resolveChatForFile(sourcePath)
+    const reopenedTarget = restarted.resolveChatForFile(targetPath)
+    expect(reopenedSource.chatId).toBe(source.chatId)
+    expect(reopenedSource.boundarySeq).toBe(2)
+    expect(reopenedTarget.chatId).toBe(target.chatId)
+    expect(reopenedTarget.boundarySeq).toBe(4)
+    restarted.appendChatMessage(reopenedSource.projectId, reopenedSource.chatId, {
+      role: 'user',
+      text: 'source-future',
+    })
+    restarted.appendChatMessage(reopenedTarget.projectId, reopenedTarget.chatId, {
+      role: 'user',
+      text: 'target-future',
+    })
+    expect(
+      restarted.loadChat(reopenedSource.projectId, reopenedSource.chatId).at(-1),
+    ).toMatchObject({
+      seq: 4,
+      text: 'source-future',
+    })
+    expect(
+      restarted.loadChat(reopenedTarget.projectId, reopenedTarget.chatId).at(-1),
+    ).toMatchObject({
+      seq: 6,
+      text: 'target-future',
+    })
+  })
+
+  it('flushes a buffered source message before copying so both histories are durable', () => {
+    const sourcePath = '/docs/opening-source.pdf'
+    const targetPath = '/docs/opening-destination.pdf'
+    const source = store.resolveChatForFile(sourcePath)
+    const target = store.resolveChatForFile(targetPath)
+    const sourceTranscript = join(
+      tmpDir,
+      'projects',
+      source.projectId,
+      'chats',
+      `${source.chatId}.jsonl`,
+    )
+
+    expect(
+      store.appendChatMessage(source.projectId, source.chatId, {
+        role: 'user',
+        text: 'first opening question',
+      }),
+    ).toBe(true)
+    expect(existsSync(sourceTranscript)).toBe(false)
+
+    store.copyChatToFile(source.projectId, source.chatId, targetPath, 'opening-copy')
+
+    expect(existsSync(sourceTranscript)).toBe(true)
+    expect(store.loadChat(source.projectId, source.chatId).map((row) => row.text)).toEqual([
+      'first opening question',
+    ])
+    expect(store.loadChat(target.projectId, target.chatId).map((row) => row.text)).toEqual([
+      'first opening question',
+    ])
+  })
+
+  it('closes destination history when Save As copies an empty New-chat session', () => {
+    const sourcePath = '/docs/empty-source.pdf'
+    const targetPath = '/docs/empty-destination.pdf'
+    const source = store.resolveChatForFile(sourcePath)
+    const target = store.resolveChatForFile(targetPath)
+    store.appendChatMessage(source.projectId, source.chatId, {
+      role: 'user',
+      text: 'closed source',
+    })
+    store.startNewChat(source.projectId, source.chatId)
+    store.appendChatMessage(target.projectId, target.chatId, {
+      role: 'user',
+      text: 'target question',
+    })
+    store.appendChatMessage(target.projectId, target.chatId, {
+      role: 'assistant',
+      text: 'target answer',
+    })
+
+    const copied = store.copyChatToFile(source.projectId, source.chatId, targetPath, 'empty-copy')
+
+    expect(copied.boundarySeq).toBe(2)
+    expect(store.resolveChatForFile(sourcePath).boundarySeq).toBe(1)
+    expect(store.resolveChatForFile(targetPath).boundarySeq).toBe(2)
+    expect(store.loadChat(source.projectId, source.chatId).map((row) => row.text)).toEqual([
+      'closed source',
+    ])
+    expect(store.loadChat(target.projectId, target.chatId).map((row) => row.text)).toEqual([
+      'target question',
+      'target answer',
+    ])
+  })
+
+  it('recovers a failed boundary write on retry without duplicating copied messages', () => {
+    const sourcePath = '/docs/retry-source.pdf'
+    const targetPath = '/docs/retry-destination.pdf'
+    const source = store.resolveChatForFile(sourcePath)
+    const target = store.resolveChatForFile(targetPath)
+    store.appendChatMessage(source.projectId, source.chatId, {
+      role: 'user',
+      text: 'source-question',
+    })
+    store.appendChatMessage(source.projectId, source.chatId, {
+      role: 'assistant',
+      text: 'source-answer',
+    })
+    store.appendChatMessage(target.projectId, target.chatId, {
+      role: 'user',
+      text: 'target-question',
+    })
+    store.appendChatMessage(target.projectId, target.chatId, {
+      role: 'assistant',
+      text: 'target-answer',
+    })
+
+    const blockedTempPath = join(tmpDir, 'projects', 'index.json.tmp')
+    mkdirSync(blockedTempPath)
+    expect(() =>
+      store.copyChatToFile(source.projectId, source.chatId, targetPath, 'save-as-copy-retry'),
+    ).toThrow()
+    expect(store.loadChat(source.projectId, source.chatId).map((row) => row.text)).toEqual([
+      'source-question',
+      'source-answer',
+    ])
+    expect(store.loadChat(target.projectId, target.chatId).map((row) => row.text)).toEqual([
+      'target-question',
+      'target-answer',
+      'source-question',
+      'source-answer',
+    ])
+
+    rmSync(blockedTempPath, { recursive: true, force: true })
+    const recovered = store.copyChatToFile(
+      source.projectId,
+      source.chatId,
+      targetPath,
+      'save-as-copy-retry',
+    )
+    expect(recovered.boundarySeq).toBe(2)
+    expect(store.loadChat(target.projectId, target.chatId)).toHaveLength(4)
+    expect(store.resolveChatForFile(targetPath).boundarySeq).toBe(2)
+  })
+})
+
+// ────────────────────────────────────────────────────────────
+// 5d. Stable chatId mapping and rename tracking
 // ────────────────────────────────────────────────────────────
 
 describe('resolveChatForFile / fileRenamed', () => {

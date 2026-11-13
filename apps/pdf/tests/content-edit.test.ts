@@ -25,6 +25,7 @@ const PNG =
 
 const saveRequest = (over: Partial<SavePdfRequest> = {}): SavePdfRequest => ({
   path: '/tmp/content-edit.pdf',
+  sourceVersion: 'unused-in-writer-test',
   markups: [],
   drawings: [],
   formValues: [],

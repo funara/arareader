@@ -89,29 +89,35 @@ function sleepSync(ms: number): void {
   Atomics.wait(sleepBuf, 0, 0, ms)
 }
 
-/** Atomic write: write to .tmp then rename, with retry on Windows file locks */
-function writeJson(filePath: string, data: unknown): void {
+/** Atomic text write: stage beside the target, then rename with Windows lock retries. */
+function atomicWriteText(filePath: string, content: string): void {
   ensureDir(dirname(filePath))
   const tmpPath = `${filePath}.tmp`
-  const content = JSON.stringify(data, null, 2)
-  writeFileSync(tmpPath, content, 'utf8')
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      renameSync(tmpPath, filePath)
-      return
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code ?? ''
-      if (!RETRYABLE_RENAME_CODES[code] || attempt === 4) {
-        try {
-          unlinkSync(tmpPath)
-        } catch {
-          /* ignore unlink failure */
-        }
-        throw err
+  try {
+    writeFileSync(tmpPath, content, 'utf8')
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        renameSync(tmpPath, filePath)
+        return
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code ?? ''
+        if (!RETRYABLE_RENAME_CODES[code] || attempt === 4) throw err
+        sleepSync(25 * 2 ** attempt)
       }
-      sleepSync(25 * 2 ** attempt)
     }
+  } catch (err) {
+    try {
+      unlinkSync(tmpPath)
+    } catch {
+      /* ignore unlink failure */
+    }
+    throw err
   }
+}
+
+/** Atomic JSON write using the same rename/retry path as transcript snapshots. */
+function writeJson(filePath: string, data: unknown): void {
+  atomicWriteText(filePath, JSON.stringify(data, null, 2))
 }
 
 /** projectId/chatId must be a single safe path segment: no separators, no traversal, ≤128 chars.
@@ -122,11 +128,27 @@ function validateId(kind: 'projectId' | 'chatId', id: string): void {
   if (!ID_PATTERN.test(id)) throw new Error(`Invalid ${kind}: ${JSON.stringify(id)}`)
 }
 
-function parseChatMessage(line: string | Buffer): ChatMessage | null {
+interface StoredChatMessage extends ChatMessage {
+  /** Internal provenance makes a Save As history copy idempotent across retries. */
+  __copyOrigin?: string
+  __copyOperationId?: string
+  /** Repeated on copied rows so a failed index write can recover its boundary from the JSONL tail. */
+  __copyBoundarySeq?: number
+}
+
+function publicChatMessage(message: StoredChatMessage): ChatMessage {
+  const visible = { ...message }
+  delete visible.__copyOrigin
+  delete visible.__copyOperationId
+  delete visible.__copyBoundarySeq
+  return visible
+}
+
+function parseChatMessage(line: string | Buffer): StoredChatMessage | null {
   try {
     const message = JSON.parse(
       typeof line === 'string' ? line : line.toString('utf8'),
-    ) as ChatMessage
+    ) as StoredChatMessage
     if (
       typeof message.seq === 'number' &&
       typeof message.role === 'string' &&
@@ -140,8 +162,8 @@ function parseChatMessage(line: string | Buffer): ChatMessage | null {
   return null
 }
 
-function readAllChatMessages(filePath: string): ChatMessage[] {
-  const messages: ChatMessage[] = []
+function readAllChatMessages(filePath: string): StoredChatMessage[] {
+  const messages: StoredChatMessage[] = []
   for (const line of readFileSync(filePath, 'utf8').split('\n')) {
     const message = parseChatMessage(line)
     if (message) messages.push(message)
@@ -158,7 +180,7 @@ function readExactlySync(fd: number, buffer: Buffer, position: number): void {
 }
 
 // shortcut: finite reads trust append order matches seq order; scan all records if writers reorder JSONL.
-function readChatTail(filePath: string, limit: number): ChatMessage[] {
+function readChatTail(filePath: string, limit: number): StoredChatMessage[] {
   const fd = openSync(filePath, 'r')
   try {
     let position = fstatSync(fd).size
@@ -400,12 +422,27 @@ export class ProjectStore {
     const index = this.readIndex(true)
     const mapped = index.chatIdByPath?.[filePath]
     if (mapped) {
-      return { projectId, chatId: mapped, boundarySeq: index.chatBoundaryByChatId?.[mapped] ?? 0 }
+      const boundarySeq = this.boundaryFromIndex(index, projectId, mapped)
+      if (boundarySeq > (index.chatBoundaryByChatId?.[mapped] ?? 0)) {
+        index.chatBoundaryByChatId = {
+          ...(index.chatBoundaryByChatId ?? {}),
+          [mapped]: boundarySeq,
+        }
+        this.writeIndex(index)
+      }
+      return { projectId, chatId: mapped, boundarySeq }
     }
     const chatId = ProjectStore.chatIdForFile(filePath)
+    const boundarySeq = this.boundaryFromIndex(index, projectId, chatId)
     index.chatIdByPath = { ...(index.chatIdByPath ?? {}), [filePath]: chatId }
+    if (boundarySeq > (index.chatBoundaryByChatId?.[chatId] ?? 0)) {
+      index.chatBoundaryByChatId = {
+        ...(index.chatBoundaryByChatId ?? {}),
+        [chatId]: boundarySeq,
+      }
+    }
     this.writeIndex(index)
-    return { projectId, chatId, boundarySeq: index.chatBoundaryByChatId?.[chatId] ?? 0 }
+    return { projectId, chatId, boundarySeq }
   }
 
   /**
@@ -413,8 +450,17 @@ export class ProjectStore {
    * is one conversation). Throws when the index cannot be read: answering 0 there
    * would silently revive a conversation the user already closed with New chat.
    */
-  chatBoundary(chatId: string): number {
-    return this.readIndex(true).chatBoundaryByChatId?.[chatId] ?? 0
+  chatBoundary(chatId: string, projectId = 'default'): number {
+    return this.boundaryFromIndex(this.readIndex(true), projectId, chatId)
+  }
+
+  /** A copied transcript row repairs the boundary if an index write failed after its atomic file write. */
+  private boundaryFromIndex(index: ProjectIndex, projectId: string, chatId: string): number {
+    const indexed = index.chatBoundaryByChatId?.[chatId] ?? 0
+    const path = this.chatPath(projectId, chatId)
+    if (!existsSync(path)) return indexed
+    const tail = readChatTail(path, 1).at(-1)
+    return Math.max(indexed, tail?.__copyBoundarySeq ?? 0)
   }
 
   /**
@@ -567,7 +613,7 @@ export class ProjectStore {
   loadChat(projectId: string, chatId: string, limit = 200): ChatMessage[] {
     const pending = this.pendingFirstWrite.get(this.seqKey(projectId, chatId)) ?? []
     const filePath = this.chatPath(projectId, chatId)
-    const messages: ChatMessage[] = [...pending]
+    const messages: StoredChatMessage[] = [...pending]
     try {
       if (existsSync(filePath)) {
         if (Number.isInteger(limit) && limit > 0) {
@@ -579,9 +625,9 @@ export class ProjectStore {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
     }
-    // Sort by seq and take the most recent `limit` entries
+    // Sort by seq and take the most recent `limit` entries; copy-retry metadata is store-private.
     messages.sort((a, b) => a.seq - b.seq)
-    return messages.slice(-limit)
+    return messages.slice(-limit).map(publicChatMessage)
   }
 
   /**
@@ -630,8 +676,10 @@ export class ProjectStore {
     toId: string,
   ): void {
     if (fromProjectId === toProjectId && fromId === toId) return
-    // The source may still have buffered opening messages: materialize them first (once the file is saved, they should be kept)
-    if (!this.flushPending(fromProjectId, fromId)) return
+    // The source may still have buffered opening messages: materialize them first (once the file is saved, they should be kept).
+    if (!this.flushPending(fromProjectId, fromId)) {
+      throw new Error('source chat history could not be flushed')
+    }
     const oldPath = this.chatPath(fromProjectId, fromId)
     const newPath = this.chatPath(toProjectId, toId)
     const sourceBoundary = this.readIndex(true).chatBoundaryByChatId?.[fromId]
@@ -645,7 +693,9 @@ export class ProjectStore {
         // The target may only have buffered opening rows (no file yet): flush them
         // first so the merge decision sees them. Otherwise the rename below would
         // overwrite that history and re-use its seq numbers.
-        if (!this.flushPending(toProjectId, toId)) return
+        if (!this.flushPending(toProjectId, toId)) {
+          throw new Error('destination chat history could not be flushed')
+        }
         if (!existsSync(newPath)) {
           renameSync(oldPath, newPath)
           didMove = true
@@ -673,7 +723,7 @@ export class ProjectStore {
     } catch (err) {
       console.warn('[project-store] rebindChat rename failed:', err)
       seqCounters.delete(this.seqKey(toProjectId, toId))
-      return
+      throw err
     }
     if (!didMove) return
 
@@ -725,7 +775,130 @@ export class ProjectStore {
   ): { projectId: string; chatId: string; boundarySeq: number } {
     const { projectId, chatId } = this.resolveChatForFile(filePath)
     this.renameOrMergeChat(tempProjectId, tempChatId, projectId, chatId)
-    return { projectId, chatId, boundarySeq: this.chatBoundary(chatId) }
+    return { projectId, chatId, boundarySeq: this.chatBoundary(chatId, projectId) }
+  }
+
+  /**
+   * Save As copy: append only the source's active conversation to the destination,
+   * leaving both files' identities and transcripts in place. Copy markers make a
+   * retry safe if the JSONL replacement succeeds but updating index.json fails.
+   */
+  copyChatToFile(
+    sourceProjectId: string,
+    sourceChatId: string,
+    filePath: string,
+    operationId: string,
+  ): { projectId: string; chatId: string; boundarySeq: number } {
+    validateId('projectId', sourceProjectId)
+    validateId('chatId', sourceChatId)
+    validateId('chatId', operationId)
+    const target = this.resolveChatForFile(filePath)
+    if (sourceProjectId === target.projectId && sourceChatId === target.chatId) return target
+
+    if (!this.flushPending(sourceProjectId, sourceChatId)) {
+      throw new Error('source chat history could not be flushed')
+    }
+    if (!this.flushPending(target.projectId, target.chatId)) {
+      throw new Error('destination chat history could not be flushed')
+    }
+    const source = this.readStoredChat(sourceProjectId, sourceChatId)
+    const destination = this.readStoredChat(target.projectId, target.chatId)
+    const copiedOperationRows = destination.filter(
+      (message) => message.__copyOperationId === operationId,
+    )
+    if (copiedOperationRows.length > 0) {
+      const operationBoundary = Math.min(
+        ...copiedOperationRows.map((message) => message.__copyBoundarySeq ?? message.seq),
+      )
+      const boundarySeq = Math.max(target.boundarySeq, operationBoundary)
+      const index = this.readIndex(true)
+      index.chatBoundaryByChatId = {
+        ...(index.chatBoundaryByChatId ?? {}),
+        [target.chatId]: boundarySeq,
+      }
+      this.writeIndex(index)
+      return { ...target, boundarySeq }
+    }
+
+    const sourceBoundary = this.chatBoundary(sourceChatId, sourceProjectId)
+    const sourceActive = source.filter((message) => message.seq >= sourceBoundary)
+    const copiedOrigins = new Set(destination.map((message) => message.__copyOrigin))
+    const messagesToCopy = sourceActive.filter(
+      (message) => !copiedOrigins.has(JSON.stringify([sourceProjectId, sourceChatId, message.seq])),
+    )
+    if (messagesToCopy.length === 0) {
+      // Saving an empty New-chat session still closes the destination's previous
+      // conversation, without copying the source's historic messages into it.
+      if (sourceActive.length > 0) return target
+      const boundarySeq = Math.max(-1, ...destination.map((message) => message.seq)) + 1
+      if (destination.length > 0) {
+        const destinationPath = this.chatPath(target.projectId, target.chatId)
+        const lines = readFileSync(destinationPath, 'utf8').split('\n')
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const row = parseChatMessage(lines[i] ?? '')
+          if (!row || row.seq !== destination.at(-1)?.seq) continue
+          lines[i] = JSON.stringify({
+            ...row,
+            __copyOperationId: operationId,
+            __copyBoundarySeq: boundarySeq,
+          })
+          break
+        }
+        atomicWriteText(destinationPath, lines.join('\n'))
+      }
+      const index = this.readIndex(true)
+      index.chatBoundaryByChatId = {
+        ...(index.chatBoundaryByChatId ?? {}),
+        [target.chatId]: boundarySeq,
+      }
+      this.writeIndex(index)
+      return { ...target, boundarySeq }
+    }
+
+    let nextSeq = Math.max(-1, ...destination.map((message) => message.seq)) + 1
+    const boundarySeq = nextSeq
+    const copies = messagesToCopy.map((message) => {
+      const copy: StoredChatMessage = {
+        ...message,
+        seq: nextSeq++,
+        __copyOrigin: JSON.stringify([sourceProjectId, sourceChatId, message.seq]),
+        __copyOperationId: operationId,
+        __copyBoundarySeq: boundarySeq,
+      }
+      return copy
+    })
+
+    const destinationPath = this.chatPath(target.projectId, target.chatId)
+    const existingText = existsSync(destinationPath) ? readFileSync(destinationPath, 'utf8') : ''
+    const separator = existingText && !existingText.endsWith('\n') ? '\n' : ''
+    atomicWriteText(
+      destinationPath,
+      `${existingText}${separator}${copies.map((message) => `${JSON.stringify(message)}\n`).join('')}`,
+    )
+    this.pendingFirstWrite.delete(this.seqKey(target.projectId, target.chatId))
+    seqCounters.set(this.seqKey(target.projectId, target.chatId), nextSeq - 1)
+
+    const index = this.readIndex(true)
+    index.chatBoundaryByChatId = {
+      ...(index.chatBoundaryByChatId ?? {}),
+      [target.chatId]: boundarySeq,
+    }
+    this.writeIndex(index)
+    return { ...target, boundarySeq }
+  }
+
+  /** Read the full transcript including an unflushed opening turn. */
+  private readStoredChat(projectId: string, chatId: string): StoredChatMessage[] {
+    const messages: StoredChatMessage[] = [
+      ...(this.pendingFirstWrite.get(this.seqKey(projectId, chatId)) ?? []),
+    ]
+    const path = this.chatPath(projectId, chatId)
+    try {
+      if (existsSync(path)) messages.push(...readAllChatMessages(path))
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+    }
+    return messages.sort((a, b) => a.seq - b.seq)
   }
 
   /**

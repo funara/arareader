@@ -88,7 +88,9 @@ describe('chat read failures', () => {
     controls.sourceReadFailures.add(sourcePath)
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
-      store.rebindChat('default', 'unsaved-read-failure', 'target-chat')
+      expect(() => store.rebindChat('default', 'unsaved-read-failure', 'target-chat')).toThrow(
+        /source read failed/,
+      )
     } finally {
       warn.mockRestore()
     }
@@ -152,10 +154,15 @@ describe('chat read failures', () => {
     writeChat('busy-chat', ['already here'])
     controls.readSyncError = 'EBUSY'
     // A guessed seq would corrupt the transcript order, so the write fails instead
-    expect(store.appendChatMessage('default', 'busy-chat', { role: 'assistant', text: 'x' })).toBe(
-      false,
-    )
-    expect(store.loadChat('default', 'busy-chat').map((m) => m.text)).toEqual(['already here'])
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(
+        store.appendChatMessage('default', 'busy-chat', { role: 'assistant', text: 'x' }),
+      ).toBe(false)
+      expect(store.loadChat('default', 'busy-chat').map((m) => m.text)).toEqual(['already here'])
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('rejects a New-chat boundary that cannot be placed after the last record', () => {

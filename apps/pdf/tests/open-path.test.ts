@@ -82,6 +82,7 @@ vi.mock('../src/main/save-pdf', async (importOriginal) => {
 
 import { PDF_CHANNELS } from '../src/shared/ipc'
 import { savePdfToPath } from '../src/main/save-pdf'
+import { pdfSourceVersion } from '../src/main/source-version'
 import {
   createPdfView,
   requestPdfClose,
@@ -116,6 +117,7 @@ async function syntheticPdf(): Promise<string> {
 
 const saveRequest = (path: string, targetPath?: string) => ({
   path,
+  sourceVersion: pdfSourceVersion(readFileSync(path)),
   targetPath,
   markups: [],
   drawings: [],
@@ -152,8 +154,11 @@ describe('pdf open-path lifecycle', () => {
     expect(hook).toHaveBeenCalledWith(wc, target)
     expect(consume(wc.id)).toBe(target)
     expect(consume(other.id)).toBe(source)
-    const loaded = await invoke(PDF_CHANNELS.readFile, wc, consume(wc.id))
-    expect((await PDFDocument.load(loaded as ArrayBuffer)).getPage(0).getRotation().angle).toBe(90)
+    const loaded = (await invoke(PDF_CHANNELS.readFile, wc, consume(wc.id))) as {
+      bytes: ArrayBuffer
+      sourceVersion: string
+    }
+    expect((await PDFDocument.load(loaded.bytes)).getPage(0).getRotation().angle).toBe(90)
     expect(await invoke(PDF_CHANNELS.save, wc, saveRequest(target))).toEqual({ ok: true })
     expect((await PDFDocument.load(readFileSync(target))).getPage(0).getRotation().angle).toBe(180)
     expect(readFileSync(source)).toEqual(original)

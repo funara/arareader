@@ -71,6 +71,13 @@ interface ChatIds {
   boundarySeq?: number
 }
 
+/** A Save As whose transcript copy has not completed yet. */
+interface PendingSaveAs {
+  sourcePath: string
+  targetPath: string
+  copyOperationId: string
+}
+
 /** A history write that failed: kept so the user can retry it without retyping */
 interface FailedWrite {
   role: 'user' | 'assistant'
@@ -388,6 +395,10 @@ export function AiPanel({
   const idsPathRef = useRef<string | null>(null)
   /** first seq of the active conversation (durable New-chat boundary) */
   const boundaryRef = useRef(0)
+  /** Save As history work is independent of the PDF write and remains retryable. */
+  const pendingSaveAsRef = useRef<PendingSaveAs | null>(null)
+  const [saveAsPending, setSaveAsPending] = useState(false)
+  const saveAsPendingRef = useRef(false)
   /** serializes history appends in call order (a fire-and-forget assistant write must not overtake the user one) */
   const writeChainRef = useRef<Promise<void>>(Promise.resolve())
   /** appends that failed, kept in order for an explicit retry */
@@ -462,6 +473,11 @@ export function AiPanel({
     setBoundaryPending(pending)
   }
 
+  const markSaveAsPending = (pending: boolean): void => {
+    saveAsPendingRef.current = pending
+    setSaveAsPending(pending)
+  }
+
   /**
    * A run may only start on a settled history: otherwise the provider would
    * receive a conversation without its earlier turns, and the restored rows
@@ -470,7 +486,7 @@ export function AiPanel({
    * may be written either — it would sit before the boundary and later read as
    * part of the earlier conversation.
    */
-  const sendBlocked = historyState !== 'ready' || boundaryPending
+  const sendBlocked = historyState !== 'ready' || boundaryPending || saveAsPending
   const sendBlockedHint =
     historyState === 'loading'
       ? t('aiHistoryLoading')
@@ -478,11 +494,13 @@ export function AiPanel({
         ? t('aiHistoryLoadFailed')
         : boundaryPending
           ? t('aiHistoryBoundaryFailed')
-          : undefined
+          : saveAsPending
+            ? t('aiHistorySaveFailed')
+            : undefined
 
   /** True when this tick may persist or send: the refs are synchronous. */
   const historyReadyForSend = (): boolean =>
-    historyStateRef.current === 'ready' && !boundaryPendingRef.current
+    historyStateRef.current === 'ready' && !boundaryPendingRef.current && !saveAsPendingRef.current
 
   // Image previews: read each newly attached image once, drop previews of removed ones
   useEffect(() => {
@@ -579,6 +597,83 @@ export function AiPanel({
     })
   }
 
+  const saveAsOperation = (sourcePath: string, targetPath: string): PendingSaveAs => {
+    const pending = pendingSaveAsRef.current
+    if (pending?.sourcePath === sourcePath && pending.targetPath === targetPath) return pending
+    const operation = {
+      sourcePath,
+      targetPath,
+      copyOperationId: `save-as-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    }
+    pendingSaveAsRef.current = operation
+    markSaveAsPending(true)
+    return operation
+  }
+
+  const resolveSaveAsSourceIds = async (
+    operation: PendingSaveAs,
+    project: PdfProjectApi,
+  ): Promise<ChatIds | null> => {
+    if (
+      pendingSaveAsRef.current !== operation &&
+      chatRefIds.current &&
+      idsPathRef.current === operation.targetPath
+    ) {
+      return chatRefIds.current
+    }
+    if (chatRefIds.current && idsPathRef.current === operation.sourcePath) return chatRefIds.current
+    if (idsPathRef.current === operation.sourcePath && chatIdsPromiseRef.current) {
+      const pendingIds = await chatIdsPromiseRef.current
+      if (pendingIds) {
+        chatRefIds.current = pendingIds
+        return pendingIds
+      }
+    }
+    if (!tempChatIdRef.current) tempChatIdRef.current = `unsaved-${Date.now()}`
+    const ids = await project.resolveChat({
+      filePath: operation.sourcePath || null,
+      tempChatId: tempChatIdRef.current,
+    })
+    chatRefIds.current = ids
+    chatIdsPromiseRef.current = Promise.resolve(ids)
+    idsPathRef.current = operation.sourcePath
+    return ids
+  }
+
+  const rebindChatToPath = async (
+    project: PdfProjectApi,
+    source: ChatIds,
+    targetPath: string,
+    operation?: PendingSaveAs,
+  ): Promise<ChatIds> => {
+    const copyToFile = Boolean(operation?.sourcePath && operation.sourcePath !== targetPath)
+    const next = await project.rebindChat({
+      projectId: source.projectId,
+      tempChatId: source.chatId,
+      newFilePath: targetPath,
+      ...(copyToFile ? { copyToFile: true, copyOperationId: operation!.copyOperationId } : {}),
+    })
+    if (!next?.chatId || typeof next.boundarySeq !== 'number') {
+      throw new Error('the conversation boundary could not be resolved')
+    }
+    const changedPath = idsPathRef.current !== targetPath
+    chatRefIds.current = next
+    chatIdsPromiseRef.current = Promise.resolve(next)
+    idsPathRef.current = targetPath
+    if (operation) {
+      // Source and destination have independent seq spaces; never carry A's boundary into B.
+      boundaryRef.current = next.boundarySeq
+      if (pendingSaveAsRef.current === operation) pendingSaveAsRef.current = null
+      markSaveAsPending(false)
+      setHistoryNotice((previous) => (previous === 'save' ? null : previous))
+    } else if (changedPath) {
+      boundaryRef.current = next.boundarySeq
+    } else {
+      boundaryRef.current = Math.max(boundaryRef.current, next.boundarySeq)
+    }
+    return next
+  }
+
   /**
    * Read this document's transcript.
    *
@@ -595,30 +690,24 @@ export function AiPanel({
   }> => {
     const project = projectApi()
     if (!project) throw new Error('history is unavailable in this window')
-    let ids = await ensureChatIds()
-    if (!ids) throw new Error("the document's conversation could not be resolved")
-    if (idsPathRef.current === null) idsPathRef.current = filePathRef.current
     const path = filePathRef.current
+    let operation = pendingSaveAsRef.current
+    if (path && idsPathRef.current !== path) {
+      operation = saveAsOperation(idsPathRef.current ?? '', path)
+    }
+    let ids = operation ? await resolveSaveAsSourceIds(operation, project) : await ensureChatIds()
+    if (!ids) throw new Error("the document's conversation could not be resolved")
+    if (idsPathRef.current === null) idsPathRef.current = path
     // Re-point when the document was saved elsewhere, and also when this attempt
-    // does not know the boundary yet: the rebind call returns the chat's current
-    // boundary, so a retry can recover a failed one.
+    // does not know the boundary yet: the rebind returns the destination boundary.
     if (path && (idsPathRef.current !== path || typeof ids.boundarySeq !== 'number')) {
-      const target = ids
-      // Apply the result inside the identity chain: a rebind queued behind this one
-      // must not be overwritten by a continuation of this call running later.
+      const source = ids
       const rebound = await serializeIdentity(async () => {
-        const next = await project.rebindChat({
-          projectId: target.projectId,
-          tempChatId: target.chatId,
-          newFilePath: path,
-        })
-        // No boundarySeq = the rebind failed (the IPC returns it only on success):
-        // never read that as "this chat was never cut"
-        if (typeof next?.boundarySeq !== 'number') return null
-        chatRefIds.current = next
-        chatIdsPromiseRef.current = Promise.resolve(next)
-        idsPathRef.current = path
-        return next
+        const current = operation
+          ? await resolveSaveAsSourceIds(operation, project)
+          : (chatRefIds.current ?? source)
+        if (!current) return null
+        return rebindChatToPath(project, current, path, operation ?? undefined)
       })
       if (!rebound) throw new Error('the conversation boundary could not be resolved')
       ids = rebound
@@ -737,6 +826,60 @@ export function AiPanel({
     for (const write of currentWrites) {
       persistMessage(write.role, write.text, write.tools, write.attachments, write.status)
     }
+    if (pendingSaveAsRef.current) scheduleSaveAs(pendingSaveAsRef.current)
+  }
+
+  /** Retry the history identity transfer only after any failed appends are replayed. */
+  const scheduleSaveAs = (operation: PendingSaveAs): void => {
+    const project = projectApi()
+    if (!project) return
+    const work = writeChainRef.current.then(async () => {
+      if (filePathRef.current !== operation.targetPath) return
+      if (failedWritesRef.current.length > 0) {
+        throw new Error('pending chat messages must be saved before Save As history can be copied')
+      }
+      await serializeIdentity(async () => {
+        if (filePathRef.current !== operation.targetPath) return
+        const source = await resolveSaveAsSourceIds(operation, project)
+        if (!source) throw new Error('the source conversation could not be resolved')
+        if (idsPathRef.current !== operation.targetPath) {
+          await rebindChatToPath(project, source, operation.targetPath, operation)
+        } else {
+          if (pendingSaveAsRef.current === operation) pendingSaveAsRef.current = null
+          markSaveAsPending(false)
+        }
+      })
+      try {
+        const { boundarySeq, split } = await loadTranscript()
+        boundaryRef.current = boundarySeq
+        if (historyStateRef.current === 'failed') {
+          if (freshOnOpenRef.current) {
+            freshOnOpenRef.current = false
+            setHistoricChat([...split.historic, ...split.active])
+            setShowHistoric(false)
+            commitNewChatBoundary()
+          } else {
+            applyRestored(split)
+          }
+          setHistoryNotice(null)
+          markHistoryState('ready')
+        } else {
+          // Destination history replaces the source's earlier-conversation block;
+          // the active conversation is the exact one copied from the source.
+          setHistoricChat(split.historic)
+        }
+      } catch {
+        setHistoryNotice('load')
+        markHistoryState('failed')
+      }
+    })
+    writeChainRef.current = work.then(
+      () => undefined,
+      () => undefined,
+    )
+    void work.catch(() => {
+      if (pendingSaveAsRef.current === operation) setHistoryNotice('save')
+    })
   }
 
   /**
@@ -1171,8 +1314,8 @@ export function AiPanel({
   }, [])
 
   /**
-   * Save As: the document now lives at a new path, so re-point the transcript at it
-   * (same chatId). The live chat is untouched — no reload, no clear.
+   * Save As keeps the source transcript and copies its active conversation to the
+   * destination. This bookkeeping is deliberately independent of the successful PDF write.
    */
   const prevFilePathRef = useRef(filePath)
   useEffect(() => {
@@ -1180,34 +1323,10 @@ export function AiPanel({
     prevFilePathRef.current = filePath
     const project = projectApi()
     if (!project || !filePath || previous === filePath) return
-    void (async () => {
-      // A Save As right after open can land before the ids resolved: wait for them
-      // instead of skipping the rebind (the transcript would stay on the old chat).
-      // When the resolve failed, the history retry path owns the rebind.
-      //
-      // Queued with the New-chat boundary: the two re-point the same transcript, so
-      // they have to apply in one order instead of letting the slower IPC win.
-      await serializeIdentity(async () => {
-        const ids = chatRefIds.current ?? (await chatIdsPromiseRef.current)
-        if (!ids || filePathRef.current !== filePath) return
-        const next = await project.rebindChat({
-          projectId: ids.projectId,
-          tempChatId: ids.chatId,
-          newFilePath: filePath,
-        })
-        if (!next?.chatId) return
-        chatRefIds.current = next
-        chatIdsPromiseRef.current = Promise.resolve(next)
-        idsPathRef.current = filePath
-        // A missing boundarySeq means the rebind failed: keep the boundary this
-        // panel already knows instead of reading it as "never cut" (0).
-        if (typeof next.boundarySeq === 'number') {
-          boundaryRef.current = Math.max(boundaryRef.current, next.boundarySeq)
-        }
-      })
-    })().catch(() => {
-      /* history bookkeeping must never break the save; the mount-time path already retries it */
-    })
+    const operation = saveAsOperation(previous, filePath)
+    scheduleSaveAs(operation)
+    // The document path is the trigger; helpers read the latest identity through refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filePath])
 
   useEffect(() => {

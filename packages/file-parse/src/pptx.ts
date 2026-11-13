@@ -1,5 +1,5 @@
-import JSZip from 'jszip'
 import { XMLParser } from 'fast-xml-parser'
+import { loadOfficeArchive } from './office-archive'
 
 const parser = new XMLParser({ ignoreAttributes: true })
 
@@ -50,7 +50,7 @@ function collectParagraphs(node: unknown, out: string[]): void {
 
 /** extract slide text from a pptx: one "## Slide N" section per slide, one line per paragraph */
 export async function pptxToText(bytes: Uint8Array): Promise<string> {
-  const zip = await JSZip.loadAsync(bytes)
+  const zip = await loadOfficeArchive(bytes, 'pptx')
   const slidePaths = Object.keys(zip.files)
     .filter((p) => /^ppt\/slides\/slide\d+\.xml$/.test(p))
     .sort((a, b) => slideNumber(a) - slideNumber(b))

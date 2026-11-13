@@ -300,7 +300,7 @@ export async function webSearch(
   try {
     const wikiQueryUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(cleanQuery)}&srlimit=${limit}&format=json`
     const res = await safeFetch(wikiQueryUrl, {
-      headers: { 'User-Agent': 'ARAReader/0.2.3 (https://github.com/funara/arareader)' },
+      headers: { 'User-Agent': 'ARAReader/0.2.4 (https://github.com/funara/arareader)' },
       timeout: 4000,
     })
     if (!res.ok) res.discard()
@@ -330,7 +330,7 @@ export async function webSearch(
   try {
     const wikiUrl = `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(cleanQuery)}&limit=${limit}&namespace=0&format=json`
     const res = await safeFetch(wikiUrl, {
-      headers: { 'User-Agent': 'ARAReader/0.2.3 (https://github.com/funara/arareader)' },
+      headers: { 'User-Agent': 'ARAReader/0.2.4 (https://github.com/funara/arareader)' },
       timeout: 4000,
     })
     if (!res.ok) res.discard()

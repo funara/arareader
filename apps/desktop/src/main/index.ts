@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import {
   BrowserWindow,
   Menu,
@@ -35,7 +35,7 @@ import {
 } from '../../../pdf/src/main/pdf-main'
 import { PDF_CHANNELS } from '../../../pdf/src/shared/ipc'
 import type { PdfMenuCommand } from '../../../pdf/src/shared/ipc'
-import { projectFileRenamed, registerAiBridge } from './ai-bridge'
+import { registerAiBridge } from './ai-bridge'
 import { readAppSettings, updateAppSetting, writeAppSetting } from './app-settings'
 import { createBlankPdfBytes } from './blank-pdf'
 import { readRecentPage, recordRecentFile, removeRecentFiles } from './recent-files'
@@ -700,10 +700,18 @@ function cleanArgPath(arg: string): string {
   return arg ? arg.replace(/^["']|["']$/g, '').trim() : ''
 }
 
-function pdfFileIn(argv: string[]): string | null {
+function resolveLaunchPath(rawPath: string, cwd: string): string {
+  const path = cleanArgPath(rawPath)
+  if (!path) return ''
+  return isAbsolute(path) ? path : resolve(cwd, path)
+}
+
+function pdfFileIn(argv: string[], cwd = process.cwd()): string | null {
   for (const raw of argv) {
     const arg = cleanArgPath(raw)
-    if (arg && PDF_RE.test(arg) && existsSync(arg)) return arg
+    if (!arg || !PDF_RE.test(arg)) continue
+    const filePath = resolveLaunchPath(arg, cwd)
+    if (existsSync(filePath)) return filePath
   }
   return null
 }
@@ -724,10 +732,12 @@ app.on('open-file', (event, filePath) => {
   })
 })
 
-app.on('second-instance', (_event, argv, _cwd, additionalData) => {
+app.on('second-instance', (_event, argv, cwd, additionalData) => {
   revealWindow()
   const launchPath = (additionalData as { launchPath?: string } | null)?.launchPath
-  const file = pdfFileIn(argv) ?? (typeof launchPath === 'string' ? launchPath : null)
+  const file =
+    pdfFileIn(argv, cwd) ??
+    (typeof launchPath === 'string' ? resolveLaunchPath(launchPath, cwd) : null)
   void (async () => {
     if (!file || !(await openDocumentPath(file))) tabManager?.openHomeTab()
   })()
@@ -787,17 +797,13 @@ void app.whenReady().then(async () => {
     app.dock.setIcon(APP_ICON_PATH)
   }
 
-  // A Save As lands the PDF on a new path: re-title its tab, record the file,
-  // and move the per-document transcript along with it.
+  // A Save As lands the PDF on a new path: re-title its tab and record the file.
+  // The renderer copies chat history separately so the source mapping survives.
   setPdfFileSavedHook((contents, filePath) => {
-    const previous = tabManager?.filePathForWebContents(contents.id)
     const errors: string[] = []
     for (const step of [
       () => tabManager?.setTabFileFor(contents.id, filePath),
       () => recordRecent(filePath),
-      () => {
-        if (previous && previous !== filePath) projectFileRenamed(previous, filePath)
-      },
     ]) {
       try {
         step()

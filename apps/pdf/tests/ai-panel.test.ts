@@ -219,6 +219,7 @@ function makeFakeHistory(draftPath: string) {
   const boundaries = new Map<string, number>()
   const paths = new Map<string, string>()
   const pending: PendingCall[] = []
+  const copyOperations = new Map<string, number>()
   const startNewChatCalls: Array<{ projectId: string; chatId: string }> = []
   let live = false
 
@@ -258,10 +259,37 @@ function makeFakeHistory(draftPath: string) {
     loadChat: async (args: { projectId: string; chatId: string }): Promise<ChatMessage[]> => [
       ...(chats.get(args.chatId) ?? []),
     ],
-    rebindChat: (args: { projectId: string; tempChatId: string; newFilePath?: string }) =>
+    rebindChat: (args: {
+      projectId: string
+      tempChatId: string
+      newFilePath?: string
+      copyToFile?: boolean
+      copyOperationId?: string
+    }) =>
       defer('rebind', () => {
         const target = chatFor(args.newFilePath ?? args.tempChatId)
         const carried = boundaries.get(args.tempChatId)
+        if (args.copyToFile) {
+          const operationKey = `${target}:${args.copyOperationId}`
+          let boundarySeq = copyOperations.get(operationKey)
+          if (boundarySeq === undefined) {
+            const active = (chats.get(args.tempChatId) ?? []).filter(
+              (row) => row.seq >= (carried ?? 0),
+            )
+            boundarySeq = seqOf(target) + 1
+            const copied = active.map((row, index) =>
+              message({ ...row, seq: boundarySeq! + index }),
+            )
+            chats.set(target, [...(chats.get(target) ?? []), ...copied])
+            boundaries.set(target, boundarySeq)
+            copyOperations.set(operationKey, boundarySeq)
+          }
+          return {
+            projectId: 'p1',
+            chatId: target,
+            boundarySeq: boundaries.get(target) ?? boundarySeq,
+          }
+        }
         if (target !== args.tempChatId) {
           chats.set(target, [...(chats.get(target) ?? []), ...(chats.get(args.tempChatId) ?? [])])
           chats.delete(args.tempChatId)
@@ -1166,7 +1194,7 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
 
     // An unknown boundary is not "never cut": loading at 0 would feed the closed
     // conversation back into the model, so the panel reports the failure instead
-    expect(container.textContent).toContain('The saved conversation could not be loaded.')
+    expect(container.textContent).toMatch(/could not be (loaded|saved to disk)/)
     expect(harness.project.loadChat).not.toHaveBeenCalled()
     await type('follow up')
     await clickSend()
@@ -1659,7 +1687,7 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
     await finishNewChatAndReload(history)
   })
 
-  it('keeps the New-chat boundary with the transcript when the boundary lands first', async () => {
+  it('keeps an empty post-New-chat Save As independent from the source transcript', async () => {
     const history = makeFakeHistory('/tmp/draft.pdf')
     const harness = makeHarness()
     harness.project = history.project
@@ -1678,9 +1706,13 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
     history.complete('rebind')
     await flush()
 
-    // The rebind carried the boundary over with the rows
+    // New chat landed on A first, so its closed rows stay with A rather than being copied to B.
     expect(history.startNewChatCalls.at(-1)).toMatchObject({ projectId: 'p1', chatId: 'chat-1' })
-    await finishNewChatAndReload(history)
+    expect(history.boundaryOf('/tmp/draft.pdf')).toBe(2)
+    expect(history.boundaryOf('/tmp/saved.pdf')).toBe(0)
+    history.live()
+    const saved = await history.project.resolveChat({ filePath: '/tmp/saved.pdf' })
+    await expect(history.project.loadChat(saved)).resolves.toEqual([])
   })
 
   it.each(['append-first', 'rebind-first', 'failed-append'])(
@@ -1717,11 +1749,22 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
         emit.done()
       })
       await mount(harness, '/tmp/draft.pdf')
-      if (order === 'rebind-first') await rerenderWithPath(harness, '/tmp/saved.pdf')
-      await send('saved question')
-      if (order !== 'rebind-first') await rerenderWithPath(harness, '/tmp/saved.pdf')
+      if (order === 'rebind-first') {
+        await rerenderWithPath(harness, '/tmp/saved.pdf')
+        await type('saved question')
+        expect(sendButton().disabled).toBe(true)
+        expect(events).toEqual(['rebind'])
+        release()
+        await flush()
+        expect(sendButton().disabled).toBe(false)
+        await clickSend()
+      } else {
+        await send('saved question')
+        await rerenderWithPath(harness, '/tmp/saved.pdf')
+      }
       if (order === 'append-first') expect(events).toEqual(['append:chat-1:user'])
-      if (order === 'rebind-first') expect(events).toEqual(['rebind'])
+      if (order === 'rebind-first')
+        expect(events.slice(0, 2)).toEqual(['rebind', 'append:chat-2:user'])
       release()
       await flush()
       if (order === 'failed-append') {
@@ -1748,6 +1791,72 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
       expect(container.textContent).toContain('saved answer')
     },
   )
+
+  it('keeps a Save As history failure retryable without changing the completed PDF save', async () => {
+    const history = makeFakeHistory('/tmp/source.pdf')
+    history.live()
+    const target = await history.project.resolveChat({ filePath: '/tmp/destination.pdf' })
+    await history.project.appendChat({
+      projectId: target.projectId,
+      chatId: target.chatId,
+      role: 'user',
+      text: 'destination question',
+    })
+    await history.project.appendChat({
+      projectId: target.projectId,
+      chatId: target.chatId,
+      role: 'assistant',
+      text: 'destination answer',
+    })
+
+    const harness = makeHarness()
+    harness.project = history.project
+    const originalRebind = history.project.rebindChat
+    const rebindCalls: Array<{ copyToFile?: boolean; copyOperationId?: string }> = []
+    let failCopy = true
+    history.project.rebindChat = vi.fn(async (args) => {
+      rebindCalls.push(args)
+      if (failCopy && args.copyToFile) throw new Error('history index is locked')
+      return originalRebind(args)
+    })
+
+    await mount(harness, '/tmp/source.pdf')
+    await rerenderWithPath(harness, '/tmp/destination.pdf')
+    expect(container.textContent).toContain('This conversation could not be saved to disk.')
+    await type('send after retry')
+    expect(sendButton().disabled).toBe(true)
+
+    failCopy = false
+    await clickLabel('Retry')
+    await flush()
+
+    expect(rebindCalls).toHaveLength(2)
+    expect(rebindCalls[0]).toMatchObject({ copyToFile: true })
+    expect(rebindCalls[1]?.copyOperationId).toBe(rebindCalls[0]?.copyOperationId)
+    const source = await history.project.resolveChat({ filePath: '/tmp/source.pdf' })
+    const saved = await history.project.resolveChat({ filePath: '/tmp/destination.pdf' })
+    const sourceRows = await history.project.loadChat({
+      projectId: source.projectId,
+      chatId: source.chatId,
+    })
+    const savedRows = await history.project.loadChat({
+      projectId: saved.projectId,
+      chatId: saved.chatId,
+    })
+    expect(sourceRows.map((row) => row.text)).toEqual(['old question', 'old answer'])
+    expect(savedRows.map((row) => row.text)).toEqual([
+      'destination question',
+      'destination answer',
+      'old question',
+      'old answer',
+    ])
+    expect(container.textContent).toContain('Earlier conversation (2)')
+    expect(container.querySelectorAll('.ai-msg-historic')).toHaveLength(2)
+    expect(container.querySelector('.ai-msg-historic')?.textContent).toContain(
+      'destination question',
+    )
+    expect(sendButton().disabled).toBe(false)
+  })
 
   it('shows the earlier conversation in this session when New chat lands before a delayed load', async () => {
     const history = makeFakeHistory('/tmp/draft.pdf')

@@ -1,5 +1,6 @@
 import JSZip from 'jszip'
 import { XMLParser } from 'fast-xml-parser'
+import { loadOfficeArchive } from './office-archive'
 
 const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' })
 
@@ -57,7 +58,7 @@ async function zipText(zip: JSZip, path: string): Promise<string | undefined> {
 
 /** extract sheet text from an xlsx: one "# SheetName" section per sheet, cells joined with " | " */
 export async function xlsxToText(bytes: Uint8Array): Promise<string> {
-  const zip = await JSZip.loadAsync(bytes)
+  const zip = await loadOfficeArchive(bytes, 'xlsx')
   const workbookXml = await zipText(zip, 'xl/workbook.xml')
   if (!workbookXml) throw new Error('Invalid xlsx: missing xl/workbook.xml')
 

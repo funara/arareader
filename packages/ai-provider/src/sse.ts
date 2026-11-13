@@ -35,12 +35,13 @@ export async function readSseStream(
     const { done, value } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
-    let boundary = buffer.indexOf('\n\n')
-    while (boundary >= 0) {
-      const event = buffer.slice(0, boundary).replace(/\r/g, '')
-      buffer = buffer.slice(boundary + 2)
+    const eventSeparator = /\r?\n\r?\n/
+    let separator = eventSeparator.exec(buffer)
+    while (separator) {
+      const event = buffer.slice(0, separator.index).replace(/\r/g, '')
+      buffer = buffer.slice(separator.index + separator[0].length)
       drain(event)
-      boundary = buffer.indexOf('\n\n')
+      separator = eventSeparator.exec(buffer)
     }
   }
   buffer += decoder.decode()

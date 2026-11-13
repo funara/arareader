@@ -51,14 +51,26 @@ async function writeRecentPaths(file: string, paths: readonly string[]): Promise
   await atomicWriteFile(file, Buffer.from(JSON.stringify(paths, null, 2), 'utf8'))
 }
 
+let recentMutationQueue: Promise<void> = Promise.resolve()
+
+function mutateRecentPaths(file: string, update: (paths: string[]) => string[]): Promise<void> {
+  const mutation = recentMutationQueue.then(async () => {
+    const paths = await readRecentPaths(file)
+    await writeRecentPaths(file, update(paths))
+  })
+  // A failed write is returned to its caller but must not poison later mutations.
+  recentMutationQueue = mutation.catch(() => {})
+  return mutation
+}
+
 /** move a PDF to the head of the recent list and persist it */
-export async function recordRecentFile(file: string, path: string): Promise<void> {
-  await writeRecentPaths(file, mergeRecentPath(await readRecentPaths(file), path))
+export function recordRecentFile(file: string, path: string): Promise<void> {
+  return mutateRecentPaths(file, (paths) => mergeRecentPath(paths, path))
 }
 
 /** drop entries from the recent list; the files on disk are untouched */
-export async function removeRecentFiles(file: string, targets: readonly string[]): Promise<void> {
-  await writeRecentPaths(file, removeRecentPaths(await readRecentPaths(file), targets))
+export function removeRecentFiles(file: string, targets: readonly string[]): Promise<void> {
+  return mutateRecentPaths(file, (paths) => removeRecentPaths(paths, targets))
 }
 
 /** stat the paths that still exist; missing files are skipped */

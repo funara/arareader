@@ -5,6 +5,22 @@ All notable changes to **ARAReader** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.2.4]
+
+### Changed
+
+- **PNG export:** Render and write pages one at a time to reduce the amount of image data held at once.
+- **Office attachments:** Limit expanded PowerPoint and spreadsheet data before extracting text.
+
+### Fixed
+
+- **PDF saving:** Detect external document changes before applying pending edits, and keep those edits available when a conflict is detected.
+- **PNG export:** Refuse existing output names instead of silently replacing images.
+- **Save As history:** Preserve the original and destination conversations when saving a copy, with retry if history copying fails.
+- **AI streaming:** Display responses promptly when the server uses CRLF event separators.
+- **Recent files and launch:** Preserve overlapping recent-file updates and open relative PDF paths from the second launch's working folder.
+- **File permissions:** Preserve existing POSIX file permissions on atomic replacement and restrict AI settings to the owner on supported systems.
+
 ## [v0.2.3]
 
 ### Added

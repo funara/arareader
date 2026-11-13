@@ -49,6 +49,7 @@ import type { HeaderFooterConfig, WatermarkConfig } from './stamps'
 import { buildSearchIndex, indexToText, searchInIndex } from './search'
 import { splitRanges } from './split'
 import type { SplitMode } from './split'
+import { exportPagesAsPng } from './export-png'
 import type { SearchIndex, SearchMatch } from './search'
 import { useI18n, t as tModule } from './i18n/locale'
 import { htmlLang } from '@arareader/i18n'
@@ -60,6 +61,7 @@ import {
   type PdfSaveState,
 } from './save-flight'
 import { isAutosaveAllowed, useAutosave } from './useAutosave'
+import { PDF_SOURCE_CONFLICT_ERROR } from '../shared/ipc'
 import type {
   DrawingInput,
   FormValueInput,
@@ -1024,6 +1026,9 @@ export default function App() {
   const currentDocRef = useRef(doc)
   currentDocRef.current = doc
   const [filePath, setFilePath] = useState('')
+  const sourceVersionRef = useRef<{ path: string; version: string } | null>(null)
+  const sourceVersionForCurrentPath = () =>
+    sourceVersionRef.current?.path === filePath ? sourceVersionRef.current.version : ''
   const [aiPanelKey, setAiPanelKey] = useState(0)
   const [status, setStatus] = useState<'loading' | 'error' | 'empty' | 'password' | 'ready'>(
     'loading',
@@ -1335,6 +1340,7 @@ export default function App() {
       try {
         const result: SanitizeResult = await window.pdfApi.sanitizePdf({
           path: filePath,
+          sourceVersion: sourceVersionForCurrentPath(),
           ...sanitizeCfg,
         })
         if (!result.ok) {
@@ -1435,9 +1441,9 @@ export default function App() {
   )
 
   const loadDoc = useCallback(async (path: string, previous: PDFDocumentProxy | null) => {
-    const data = await window.pdfApi.readFile(path)
+    const fileData = await window.pdfApi.readFile(path)
     const loaded = await getDocument({
-      data: new Uint8Array(data),
+      data: new Uint8Array(fileData.bytes),
       password: passwordRef.current,
       ...DOC_OPTS,
     }).promise
@@ -1477,6 +1483,7 @@ export default function App() {
       throw error
     }
     flushSync(() => {
+      sourceVersionRef.current = { path, version: fileData.sourceVersion }
       setSizes(all)
       setBaseRots(rots)
       setDoc(loaded)
@@ -1489,7 +1496,7 @@ export default function App() {
       setDeleted(new Set())
       setOrder(null)
       setMetadata(null)
-      setFileSize(data.byteLength)
+      setFileSize(fileData.bytes.byteLength)
       setSelected(null)
       setDeleteToast(false)
       setUndoStack([])
@@ -2228,7 +2235,11 @@ export default function App() {
       lastSaveAtRef.current = Date.now()
       let result: Awaited<ReturnType<typeof window.pdfApi.save>>
       try {
-        result = await window.pdfApi.save({ path: filePath, ...editsPayload() })
+        result = await window.pdfApi.save({
+          path: filePath,
+          sourceVersion: sourceVersionForCurrentPath(),
+          ...editsPayload(),
+        })
       } catch (err) {
         opFailed(err instanceof Error ? err.message : String(err), 'save')
         return false
@@ -2286,6 +2297,7 @@ export default function App() {
         const result = await window.pdfApi.save({
           path: filePath,
           targetPath: target,
+          sourceVersion: sourceVersionForCurrentPath(),
           ...editsPayload(),
         })
         if (!result.ok) {
@@ -2348,6 +2360,47 @@ export default function App() {
     )
       return
     void reloadDoc().catch(() => {})
+  }
+
+  const reloadAfterSourceConflict = async () => {
+    if (
+      !doc ||
+      externalRefreshRef.current ||
+      saveInFlightRef.current ||
+      saveAsInFlightRef.current ||
+      pendingReconcileRef.current ||
+      directOperationRef.current ||
+      editProducersRef.current
+    )
+      return
+    if (
+      !window.confirm(
+        'Reload the changed PDF from disk? This discards the pending edits shown in this tab.',
+      )
+    )
+      return
+    externalRefreshRef.current = true
+    setExternalRefreshBusy(true)
+    setSaveState('saving')
+    const top = scrollRef.current?.scrollTop ?? 0
+    try {
+      lastSaveAtRef.current = Date.now()
+      await loadDoc(filePath, doc)
+      dirtyRef.current = false
+      window.pdfApi.setDirty(false)
+      setSaveError('')
+      setSaveState('idle')
+      requestAnimationFrame(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = top
+      })
+    } catch (err) {
+      opFailed(
+        `Reload failed. Your pending edits are still here. ${err instanceof Error ? err.message : String(err)}`,
+      )
+    } finally {
+      externalRefreshRef.current = false
+      setExternalRefreshBusy(false)
+    }
   }
 
   // External rebuilds (LaTeX/Typst and friends): re-read the open file when it changes on disk,
@@ -2586,34 +2639,41 @@ export default function App() {
     flushThen(async () => {
       if (!doc || exporting) return
       setExporting(true)
+      let exportId: string | undefined
+      let completed = false
       try {
         const targets = allPages ? visList : [curOrigIdx].filter((i) => i >= 0)
-        const images: string[] = []
-        const pageNumbers: number[] = []
-        const canvas = document.createElement('canvas')
-        for (const origIdx of targets) {
-          const page = await doc.getPage(origIdx + 1)
-          const viewport = page.getViewport({
-            scale: 150 / 72,
-            rotation: (page.rotate + rotDelta(origIdx)) % 360,
-          })
-          canvas.width = Math.floor(viewport.width)
-          canvas.height = Math.floor(viewport.height)
-          await page.render({ canvas, viewport }).promise
-          images.push(canvas.toDataURL('image/png').split(',')[1] ?? '')
-          pageNumbers.push(visList.indexOf(origIdx) + 1)
-        }
-        canvas.width = 0
-        canvas.height = 0
-        const result = await window.pdfApi.exportImages({
-          images,
+        const pageNumbers = targets.map((origIdx) => visList.indexOf(origIdx) + 1)
+        const started = await window.pdfApi.beginExportImages({
           pageNumbers,
           baseName: fileName.replace(/\.pdf$/i, ''),
         })
+        if (!started.ok) {
+          opFailed(started.error)
+          return
+        }
+        if ('canceled' in started) return
+        const id = started.exportId
+        exportId = id
+
+        await exportPagesAsPng(
+          doc,
+          targets,
+          (origIdx, pageRotation) => pageRotation + rotDelta(origIdx),
+          async (index, image) => {
+            const result = await window.pdfApi.writeExportImage({ exportId: id, index, image })
+            if (!result.ok) throw new Error(result.error)
+          },
+        )
+        const result = await window.pdfApi.finishExportImages({ exportId: id })
         if (!result.ok) opFailed(result.error)
+        else completed = true
       } catch (err) {
         opFailed(err instanceof Error ? err.message : String(err))
       } finally {
+        if (exportId && !completed) {
+          await window.pdfApi.cancelExportImages({ exportId }).catch(() => {})
+        }
         setExporting(false)
       }
     })
@@ -2839,7 +2899,11 @@ export default function App() {
     const afterPageIndex = afterOrigIdx === -1 ? -1 : visList.indexOf(afterOrigIdx)
     if (afterOrigIdx !== -1 && afterPageIndex < 0) return Promise.resolve()
     return flushThen(async () => {
-      const result = await window.pdfApi.insertPdf({ path: filePath, afterPageIndex })
+      const result = await window.pdfApi.insertPdf({
+        path: filePath,
+        sourceVersion: sourceVersionForCurrentPath(),
+        afterPageIndex,
+      })
       if (!result.ok) {
         opFailed(result.error)
         return
@@ -2860,6 +2924,7 @@ export default function App() {
     void flushThen(async () => {
       const result = await window.pdfApi.insertBlankPage({
         path: filePath,
+        sourceVersion: sourceVersionForCurrentPath(),
         afterPageIndex: afterOrigIdx,
       })
       if (!result.ok) {
@@ -2884,6 +2949,7 @@ export default function App() {
     void flushThen(async () => {
       const result = await window.pdfApi.duplicatePages({
         path: filePath,
+        sourceVersion: sourceVersionForCurrentPath(),
         pageIndices: origIndices,
       })
       if (!result.ok) {
@@ -2989,7 +3055,11 @@ export default function App() {
       }
       try {
         await flushThen(async () => {
-          const r = await window.pdfApi.setOutline({ path: filePath, nodes: mapped })
+          const r = await window.pdfApi.setOutline({
+            path: filePath,
+            sourceVersion: sourceVersionForCurrentPath(),
+            nodes: mapped,
+          })
           if (!r.ok) {
             result = { ok: false, error: r.error }
             return
@@ -3121,7 +3191,11 @@ export default function App() {
       if (!doc || exporting) return
       setExporting(true)
       try {
-        const request: A11yFixRequest = { path: filePath, lang: htmlLang(uiLang) }
+        const request: A11yFixRequest = {
+          path: filePath,
+          sourceVersion: sourceVersionForCurrentPath(),
+          lang: htmlLang(uiLang),
+        }
         const result: A11yFixResult = await window.pdfApi.a11yFix(request)
         if (!result.ok) {
           opFailed(result.error)
@@ -3198,6 +3272,7 @@ export default function App() {
       try {
         const result: DeleteAnnotationsResult = await window.pdfApi.deleteAnnotations({
           path: filePath,
+          sourceVersion: sourceVersionForCurrentPath(),
           targets: [row.match],
         })
         if (!result.ok) {
@@ -3288,7 +3363,11 @@ export default function App() {
       setExporting(true)
       try {
         const nodes = rebaseOutline(draft.nodes, draft.visList, visList)
-        const result = await window.pdfApi.setOutline({ path: filePath, nodes })
+        const result = await window.pdfApi.setOutline({
+          path: filePath,
+          sourceVersion: sourceVersionForCurrentPath(),
+          nodes,
+        })
         if (!result.ok) {
           opFailed(result.error)
           return
@@ -6239,15 +6318,26 @@ export default function App() {
             {saveErrorKind === 'save' ? `${t('saveFailed')}: ` : ''}
             {saveError}
           </span>
-          {saveErrorKind === 'save' && dirty && (
-            <>
-              <button type="button" className="pdf-modal-btn" onClick={() => void save()}>
-                {t('save')}
-              </button>
-              <button type="button" className="pdf-modal-btn" onClick={() => void saveAs()}>
-                Save As…
-              </button>
-            </>
+          {saveErrorKind === 'save' &&
+            dirty &&
+            !saveError.startsWith(PDF_SOURCE_CONFLICT_ERROR) && (
+              <>
+                <button type="button" className="pdf-modal-btn" onClick={() => void save()}>
+                  {t('save')}
+                </button>
+                <button type="button" className="pdf-modal-btn" onClick={() => void saveAs()}>
+                  Save As…
+                </button>
+              </>
+            )}
+          {saveError.startsWith(PDF_SOURCE_CONFLICT_ERROR) && (
+            <button
+              type="button"
+              className="pdf-modal-btn"
+              onClick={() => void reloadAfterSourceConflict()}
+            >
+              Reload from disk (discard edits)
+            </button>
           )}
         </div>
       )}

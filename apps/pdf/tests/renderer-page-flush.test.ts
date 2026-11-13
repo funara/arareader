@@ -89,6 +89,7 @@ async function harness(visList: number[], saved = true) {
     save,
     fileName: 'synthetic.pdf',
     filePath: 'synthetic.pdf',
+    sourceVersionForCurrentPath: () => 'displayed-source-version',
     visList,
     pageCount: visList.length,
     extractInput: '1',
@@ -150,7 +151,11 @@ describe('page actions after flushing pending page operations', () => {
     const h = await harness([2, 0, 1])
     h.api.insertPdf.mockResolvedValueOnce({ ok: true, canceled: true })
     await h.insertPdf(-1)
-    expect(h.api.insertPdf).toHaveBeenCalledWith({ path: 'synthetic.pdf', afterPageIndex: -1 })
+    expect(h.api.insertPdf).toHaveBeenCalledWith({
+      path: 'synthetic.pdf',
+      sourceVersion: 'displayed-source-version',
+      afterPageIndex: -1,
+    })
     expect(h.loadDoc).not.toHaveBeenCalled()
     expect(await h.getWidths()).toEqual([303, 101, 202])
   })

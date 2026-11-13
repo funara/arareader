@@ -25,6 +25,7 @@ import type {
 } from '../shared/ipc'
 import { MIN_POLY_POINTS } from '../shared/ipc'
 import { applyOutline } from './outline-writer'
+import { assertPdfFileAtVersion, readPdfSourceAtVersion } from './source-version'
 
 const num = (v: number) => Math.round(v * 100) / 100
 
@@ -733,8 +734,13 @@ export async function savePdfToPath(
   sourcePath: string,
   targetPath: string,
   request: SavePdfRequest,
+  expectedSourceVersion?: string,
 ): Promise<void> {
-  const bytes = await applySaveRequest(new Uint8Array(await readFile(sourcePath)), request)
+  const sourceBytes = expectedSourceVersion
+    ? await readPdfSourceAtVersion(sourcePath, expectedSourceVersion)
+    : await readFile(sourcePath)
+  const bytes = await applySaveRequest(new Uint8Array(sourceBytes), request)
+  if (expectedSourceVersion) await assertPdfFileAtVersion(sourcePath, expectedSourceVersion)
   await atomicWriteFile(targetPath, bytes)
 }
 

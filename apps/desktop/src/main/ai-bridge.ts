@@ -138,7 +138,7 @@ async function readStoredSettings(): Promise<Partial<AiSettings>> {
 async function writeStoredSettings(settings: AiSettings): Promise<void> {
   const filePath = settingsPath()
   await mkdir(dirname(filePath), { recursive: true })
-  await atomicWriteFile(filePath, Buffer.from(JSON.stringify(settings, null, 2)))
+  await atomicWriteFile(filePath, Buffer.from(JSON.stringify(settings, null, 2)), { mode: 0o600 })
 }
 
 // ---- per-WebContents attachment grants ----
@@ -304,21 +304,6 @@ let projectStore: ProjectStore | null = null
 function getProjectStore(): ProjectStore {
   if (!projectStore) projectStore = new ProjectStore(app.getPath('userData'))
   return projectStore
-}
-
-/**
- * After a file is renamed/moved on disk, sync project-store so fileMap and
- * chatIdByPath re-key and the transcript follows the file (Save As hook).
- * Best-effort: a history bookkeeping failure must never break a save.
- */
-export function projectFileRenamed(oldPath: string, newPath: string): void {
-  if (typeof oldPath !== 'string' || typeof newPath !== 'string') return
-  if (!oldPath || !newPath || oldPath === newPath) return
-  try {
-    getProjectStore().fileRenamed(oldPath, newPath)
-  } catch (err) {
-    console.warn('[ai-bridge] project fileRenamed failed:', err)
-  }
 }
 
 // ---- IPC ----
@@ -731,16 +716,22 @@ export function registerAiBridge(options: AiBridgeOptions = {}): void {
     const tempChatId = typeof args?.tempChatId === 'string' ? args.tempChatId : ''
     const store = getProjectStore()
     try {
-      // first save / Save As: the chat id is derived from the real path and the
-      // temp transcript moves along with it
+      // First save moves the temp transcript; Save As can instead copy the active
+      // conversation into the destination while retaining the source mapping.
       if (typeof args?.newFilePath === 'string' && args.newFilePath) {
+        if (args.copyToFile === true) {
+          if (typeof args.copyOperationId !== 'string' || !args.copyOperationId) {
+            return { projectId, chatId: tempChatId }
+          }
+          return store.copyChatToFile(projectId, tempChatId, args.newFilePath, args.copyOperationId)
+        }
         return store.rebindChatToFile(projectId, tempChatId, args.newFilePath)
       }
       if (typeof args?.newChatId === 'string' && args.newChatId) {
         store.rebindChat(projectId, tempChatId, args.newChatId)
       }
       const chatId = args?.newChatId ?? tempChatId
-      return { projectId, chatId, boundarySeq: store.chatBoundary(chatId) }
+      return { projectId, chatId, boundarySeq: store.chatBoundary(chatId, projectId) }
     } catch (err) {
       console.warn('[ai-bridge] project rebindChat failed:', err)
       // No boundarySeq: the caller must treat the boundary as unknown, not as

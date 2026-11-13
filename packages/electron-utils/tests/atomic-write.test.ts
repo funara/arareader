@@ -1,5 +1,5 @@
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { rename } from 'node:fs/promises'
+import { chmod, rename, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -39,6 +39,26 @@ describe('atomicWriteFile', () => {
     expect(readFileSync(target, 'utf-8')).toBe('old')
     expect(readdirSync(dir)).toEqual(['a.txt'])
   })
+
+  it.skipIf(process.platform === 'win32')(
+    'preserves existing POSIX mode bits when replacing a file',
+    async () => {
+      dir = mkdtempSync(join(tmpdir(), 'aw-utils-'))
+      const target = join(dir, 'private.json')
+      writeFileSync(target, 'old')
+      await chmod(target, 0o600)
+
+      const previousUmask = process.umask(0o022)
+      try {
+        await atomicWriteFile(target, Buffer.from('new'))
+      } finally {
+        process.umask(previousUmask)
+      }
+
+      expect(readFileSync(target, 'utf-8')).toBe('new')
+      expect((await stat(target)).mode & 0o777).toBe(0o600)
+    },
+  )
 
   it('retries a transiently locked rename and still lands atomically', async () => {
     dir = mkdtempSync(join(tmpdir(), 'aw-utils-'))

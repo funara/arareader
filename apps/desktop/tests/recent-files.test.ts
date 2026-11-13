@@ -1,7 +1,8 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as electronUtils from '@arareader/electron-utils'
 import {
   mergeRecentPath,
   normalizeRecentQuery,
@@ -12,6 +13,16 @@ import {
   removeRecentPaths,
   statRecentEntries,
 } from '../src/main/recent-files'
+
+const originalAtomicWriteFile = electronUtils.atomicWriteFile
+
+function deferred() {
+  let resolve!: () => void
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
 
 describe('recent files', () => {
   let dir: string
@@ -30,6 +41,7 @@ describe('recent files', () => {
   })
 
   afterEach(async () => {
+    vi.restoreAllMocks()
     await rm(dir, { recursive: true, force: true })
   })
 
@@ -39,6 +51,74 @@ describe('recent files', () => {
     await recordRecentFile(recentFile, pdfA)
 
     expect(await readRecentPaths(recentFile)).toEqual([pdfA, pdfB])
+  })
+
+  it('serializes overlapping additions instead of losing a recent PDF', async () => {
+    const firstWriteStarted = deferred()
+    const allowFirstWrite = deferred()
+    let writeCount = 0
+    vi.spyOn(electronUtils, 'atomicWriteFile').mockImplementation(async (...args) => {
+      writeCount++
+      if (writeCount === 1) {
+        firstWriteStarted.resolve()
+        await allowFirstWrite.promise
+      }
+      await originalAtomicWriteFile(...args)
+    })
+
+    const first = recordRecentFile(recentFile, pdfA)
+    await firstWriteStarted.promise
+    const second = recordRecentFile(recentFile, pdfB)
+    try {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10))
+      expect(writeCount).toBe(1)
+    } finally {
+      allowFirstWrite.resolve()
+      await Promise.allSettled([first, second])
+    }
+
+    expect(await readRecentPaths(recentFile)).toEqual([pdfB, pdfA])
+  })
+
+  it('serializes removal and addition so both recent-list mutations apply', async () => {
+    await writeFile(recentFile, JSON.stringify([pdfA, pdfB]))
+    const firstWriteStarted = deferred()
+    const allowFirstWrite = deferred()
+    let writeCount = 0
+    vi.spyOn(electronUtils, 'atomicWriteFile').mockImplementation(async (...args) => {
+      writeCount++
+      if (writeCount === 1) {
+        firstWriteStarted.resolve()
+        await allowFirstWrite.promise
+      }
+      await originalAtomicWriteFile(...args)
+    })
+
+    const removal = removeRecentFiles(recentFile, [pdfB])
+    await firstWriteStarted.promise
+    const addition = recordRecentFile(recentFile, pdfC)
+    try {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10))
+      expect(writeCount).toBe(1)
+    } finally {
+      allowFirstWrite.resolve()
+      await Promise.allSettled([removal, addition])
+    }
+
+    expect(await readRecentPaths(recentFile)).toEqual([pdfC, pdfA])
+  })
+
+  it('continues processing recent mutations after a write failure', async () => {
+    vi.spyOn(electronUtils, 'atomicWriteFile')
+      .mockRejectedValueOnce(new Error('injected recent write failure'))
+      .mockImplementation((...args) => originalAtomicWriteFile(...args))
+
+    await expect(recordRecentFile(recentFile, pdfA)).rejects.toThrow(
+      'injected recent write failure',
+    )
+    await recordRecentFile(recentFile, pdfB)
+
+    expect(await readRecentPaths(recentFile)).toEqual([pdfB])
   })
 
   it('caps the list at 100 entries, dropping the oldest', () => {

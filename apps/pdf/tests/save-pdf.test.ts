@@ -60,6 +60,7 @@ function emptyPdfBytes(): Uint8Array {
 
 const request = (over: Partial<SavePdfRequest> = {}): SavePdfRequest => ({
   path: '/tmp/test.pdf',
+  sourceVersion: 'unused-in-writer-test',
   markups: [],
   drawings: [],
   formValues: [],

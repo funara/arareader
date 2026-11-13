@@ -26,6 +26,11 @@ export interface A11yReport {
   rules: A11yRuleResult[]
 }
 
+export const PDF_SOURCE_CONFLICT_ERROR =
+  'pdf: file changed on disk since it was opened. No write was made and pending edits were kept. Reload from disk to view the external version.'
+export const PDF_SOURCE_VERSION_REQUIRED_ERROR =
+  'pdf: source version is required; reload this PDF before writing'
+
 export const PDF_CHANNELS = {
   consumePending: 'pdf:consume-pending',
   readFile: 'pdf:read-file',
@@ -38,7 +43,10 @@ export const PDF_CHANNELS = {
   insertPdf: 'pdf:insert-pdf',
   insertBlankPage: 'pdf:insert-blank-page',
   duplicatePages: 'pdf:duplicate-pages',
-  exportImages: 'pdf:export-images',
+  beginExportImages: 'pdf:begin-export-images',
+  writeExportImage: 'pdf:write-export-image',
+  finishExportImages: 'pdf:finish-export-images',
+  cancelExportImages: 'pdf:cancel-export-images',
   exportText: 'pdf:export-text',
   exportEmbeddedImages: 'pdf:export-embedded-images',
   setOutline: 'pdf:set-outline',
@@ -134,6 +142,7 @@ export type SanitizeReport = Record<keyof SanitizeRequest, number>
 export interface SanitizePdfRequest extends SanitizeRequest {
   /** The path rewritten in place; the same grant check every other write goes through */
   path: string
+  sourceVersion: string
 }
 
 export type SanitizeResult = { ok: true; report: SanitizeReport } | { ok: false; error: string }
@@ -165,6 +174,7 @@ export interface AnnotMatch {
 /** Comments-panel deletion: refusals are whole-batch so the file never half-matches the panel */
 export interface DeleteAnnotationsRequest {
   path: string
+  sourceVersion: string
   targets: AnnotMatch[]
 }
 
@@ -181,6 +191,7 @@ export type A11yCheckResult = { ok: true; report: A11yReport } | { ok: false; er
 export interface A11yFixRequest {
   /** The granted path the fix rewrites in place */
   path: string
+  sourceVersion: string
   /** BCP-47-ish tag written when the catalogue has no /Lang */
   lang: string
 }
@@ -308,6 +319,8 @@ export interface FormValueInput {
 
 export interface SavePdfRequest {
   path: string
+  /** SHA-256 of the exact PDF bytes this renderer displayed */
+  sourceVersion: string
   /**
    * Save As destination. When set, `path` is only read (source bytes) and the edited PDF
    * is written to this path instead — the original file must never be mutated.
@@ -343,6 +356,7 @@ export type ExtractPagesResult =
 /** Insert (merge) another PDF after a page of the current file: main process shows a picker and writes back immediately */
 export interface InsertPdfRequest {
   path: string
+  sourceVersion: string
   /** Insert after this original page index; -1 means front of the document */
   afterPageIndex: number
 }
@@ -353,6 +367,7 @@ export type InsertPdfResult =
 /** Insert one blank page in place, sized like the page it follows; no dialog, no new file */
 export interface InsertBlankPageRequest {
   path: string
+  sourceVersion: string
   /** Insert after this original page index; -1 means front of the document */
   afterPageIndex: number
 }
@@ -363,6 +378,7 @@ export type InsertBlankPageResult = { ok: true; pageIndex: number } | { ok: fals
 /** Copy pages in place, each copy directly after its source */
 export interface DuplicatePagesRequest {
   path: string
+  sourceVersion: string
   /** Original page indices; values outside the document are ignored */
   pageIndices: number[]
 }
@@ -370,19 +386,40 @@ export interface DuplicatePagesRequest {
 /** count is how many copies were written (invalid indices contribute nothing) */
 export type DuplicatePagesResult = { ok: true; count: number } | { ok: false; error: string }
 
-/** Export pages as PNG: renderer rasterizes the bitmaps, main process shows a dialog and writes to disk */
-export interface ExportImagesRequest {
-  /** base64 PNGs (without the data: prefix), in page order */
-  images: string[]
-  /** 1-based page numbers, same length as images, used for file names */
+/** Start one PNG export; each page is rendered and sent separately to bound renderer/IPC memory. */
+export interface BeginExportImagesRequest {
+  /** 1-based page numbers, in the order pages will be written */
   pageNumbers: number[]
   baseName: string
 }
 
-export type ExportImagesResult =
-  | { ok: true; savedDir: string; count: number }
+export type BeginExportImagesResult =
+  | { ok: true; exportId: string; savedDir: string; count: number }
   | { ok: true; canceled: true }
   | { ok: false; error: string }
+
+export interface WriteExportImageRequest {
+  exportId: string
+  /** Zero-based position in the pageNumbers passed to beginExportImages */
+  index: number
+  /** Base64 PNG without the data: prefix; only one page is sent per request */
+  image: string
+}
+
+export type WriteExportImageResult = { ok: true } | { ok: false; error: string }
+
+export interface FinishExportImagesRequest {
+  exportId: string
+}
+
+export type FinishExportImagesResult =
+  { ok: true; savedDir: string; count: number } | { ok: false; error: string }
+
+export interface CancelExportImagesRequest {
+  exportId: string
+}
+
+export type CancelExportImagesResult = { ok: true } | { ok: false; error: string }
 
 /** Export the document's text: main process shows a save dialog and writes it */
 export interface ExportTextRequest {
@@ -441,6 +478,7 @@ export interface OutlineEditNode {
 
 export interface SetOutlineRequest {
   path: string
+  sourceVersion: string
   nodes: OutlineEditNode[]
 }
 
@@ -551,11 +589,18 @@ export interface WebFetchResult {
 }
 
 /** API exposed by preload to the renderer (window.pdfApi) */
+export interface PdfFileData {
+  /** Bytes handed to PDF.js */
+  bytes: ArrayBuffer
+  /** SHA-256 of exactly those bytes, used to guard later writes */
+  sourceVersion: string
+}
+
 export interface PdfApi {
   /** Take the pdf path pending for this view (queued at tab creation); null if none */
   consumePending(): Promise<string | null>
   /** Read pdf bytes. Only paths granted to this view are allowed */
-  readFile(path: string): Promise<ArrayBuffer>
+  readFile(path: string): Promise<PdfFileData>
   /** Write markups/form values/page ops back to the original file (pdf-lib, content streams untouched); path grants same as readFile. With targetPath set (Save As), the original is only read and the result goes to targetPath */
   save(request: SavePdfRequest): Promise<SavePdfResult>
   /** Host File menu (Save / Save As / Print accelerators) routed to this view; returns an unsubscribe */
@@ -568,7 +613,10 @@ export interface PdfApi {
   insertPdf(request: InsertPdfRequest): Promise<InsertPdfResult>
   insertBlankPage(request: InsertBlankPageRequest): Promise<InsertBlankPageResult>
   duplicatePages(request: DuplicatePagesRequest): Promise<DuplicatePagesResult>
-  exportImages(request: ExportImagesRequest): Promise<ExportImagesResult>
+  beginExportImages(request: BeginExportImagesRequest): Promise<BeginExportImagesResult>
+  writeExportImage(request: WriteExportImageRequest): Promise<WriteExportImageResult>
+  finishExportImages(request: FinishExportImagesRequest): Promise<FinishExportImagesResult>
+  cancelExportImages(request: CancelExportImagesRequest): Promise<CancelExportImagesResult>
   exportText(request: ExportTextRequest): Promise<ExportTextResult>
   exportEmbeddedImages(request: ExportEmbeddedImagesRequest): Promise<ExportEmbeddedImagesResult>
   setOutline(request: SetOutlineRequest): Promise<SetOutlineResult>

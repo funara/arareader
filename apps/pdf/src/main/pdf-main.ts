@@ -1,6 +1,7 @@
+import { randomUUID } from 'node:crypto'
 import { existsSync, watch } from 'node:fs'
 import type { FSWatcher } from 'node:fs'
-import { readFile, unlink } from 'node:fs/promises'
+import { link, lstat, readFile, unlink } from 'node:fs/promises'
 import { dirname, join, basename, extname } from 'node:path'
 import { BrowserWindow, WebContentsView, dialog, ipcMain, nativeTheme, shell } from 'electron'
 import type { WebContents } from 'electron'
@@ -12,7 +13,7 @@ import {
 } from '@arareader/electron-utils'
 import { createI18n, getUiLang } from '@arareader/i18n'
 import { PDFDocument } from 'pdf-lib'
-import { PDF_CHANNELS } from '../shared/ipc'
+import { PDF_CHANNELS, PDF_SOURCE_VERSION_REQUIRED_ERROR } from '../shared/ipc'
 import type {
   A11yCheckRequest,
   A11yFixRequest,
@@ -22,10 +23,16 @@ import type {
   CombinePdfsResult,
   DuplicatePagesRequest,
   DuplicatePagesResult,
+  BeginExportImagesRequest,
+  BeginExportImagesResult,
+  WriteExportImageRequest,
+  WriteExportImageResult,
+  FinishExportImagesRequest,
+  FinishExportImagesResult,
+  CancelExportImagesRequest,
+  CancelExportImagesResult,
   ExportEmbeddedImagesRequest,
   ExportEmbeddedImagesResult,
-  ExportImagesRequest,
-  ExportImagesResult,
   ExportTextRequest,
   ExportTextResult,
   ExtractPagesRequest,
@@ -62,6 +69,7 @@ import { applyOutline } from './outline-writer'
 import { collectA11yReport, fixA11yMetadataBytes } from './a11y-check'
 import { deleteAnnotsBytes } from './delete-annots'
 import { collectEmbeddedImages } from './extract-images'
+import { assertPdfFileAtVersion, pdfSourceVersion, readPdfSourceAtVersion } from './source-version'
 
 const tDlg = createI18n({
   zh: {
@@ -406,6 +414,91 @@ const WATCH_DEBOUNCE_MS = 300
 /** An atomic replace invalidates the OS handle, so the watcher is re-armed after the burst */
 const WATCH_REARM_MS = 150
 
+interface PngExportSession {
+  dir: string
+  paths: string[]
+  published: { path: string; dev: bigint; ino: bigint }[]
+  nextIndex: number
+  closed: boolean
+  pendingWrite?: Promise<void>
+  cleanup?: Promise<void>
+}
+
+/** Sessions are scoped to the sender WebContents; the renderer never supplies an output path. */
+const pngExportsByWc = new Map<number, Map<string, PngExportSession>>()
+
+async function publishPngNoClobber(
+  session: PngExportSession,
+  target: string,
+  bytes: Buffer,
+): Promise<void> {
+  const temp = join(dirname(target), `.${basename(target)}.${randomUUID()}.tmp`)
+  try {
+    await atomicWriteFile(temp, bytes)
+    const { dev, ino } = await lstat(temp, { bigint: true })
+    try {
+      // A same-directory hard link publishes only the complete file and fails atomically if the
+      // destination appeared after the initial collision scan.
+      await link(temp, target)
+      session.published.push({ path: target, dev, ino })
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(`pdf: file already exists: ${target}`, { cause: err })
+      }
+      throw err
+    }
+  } finally {
+    try {
+      await unlink(temp)
+    } catch {
+      // A failed write can leave no temporary file; cleanup is best effort.
+    }
+  }
+}
+
+function removePngExport(session: PngExportSession): Promise<void> {
+  session.closed = true
+  session.cleanup ??= (async () => {
+    try {
+      await session.pendingWrite
+    } catch {
+      // A failed page write still needs the previous successful pages removed.
+    }
+    for (const published of session.published) {
+      try {
+        const current = await lstat(published.path, { bigint: true })
+        // shortcut: identity can change between lstat and unlink; use OS conditional unlink if available.
+        if (
+          published.ino !== 0n &&
+          current.isFile() &&
+          current.dev === published.dev &&
+          current.ino === published.ino
+        ) {
+          await unlink(published.path)
+        }
+      } catch {
+        // Preserve the export error; cleanup is best effort.
+      }
+    }
+  })()
+  return session.cleanup
+}
+
+function getPngExport(wcId: number, exportId: unknown): PngExportSession | undefined {
+  return typeof exportId === 'string' ? pngExportsByWc.get(wcId)?.get(exportId) : undefined
+}
+
+function forgetPngExport(wcId: number, exportId: string): void {
+  const sessions = pngExportsByWc.get(wcId)
+  sessions?.delete(exportId)
+  if (sessions?.size === 0) pngExportsByWc.delete(wcId)
+}
+
+async function abortPngExport(wcId: number, exportId: string, session: PngExportSession) {
+  forgetPngExport(wcId, exportId)
+  await removePngExport(session)
+}
+
 function closeWatch(wcId: number): void {
   const entry = watchByWc.get(wcId)
   if (!entry) return
@@ -597,10 +690,12 @@ function registerPdfIpc(): void {
       throw new Error('pdf: path not granted to this view')
     }
     const buf = await readFile(path)
-    // The read succeeded, so the grant is real and the file exists: start watching it for
-    // external rebuilds. A reload of the same path keeps the watcher it already has.
+    // The version is derived from the exact bytes PDF.js receives, not watcher metadata.
     ensureWatch(e.sender, path)
-    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
+    return {
+      bytes: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+      sourceVersion: pdfSourceVersion(buf),
+    }
   })
 
   ipcMain.handle(PDF_CHANNELS.save, async (e, request: SavePdfRequest): Promise<SavePdfResult> => {
@@ -616,8 +711,11 @@ function registerPdfIpc(): void {
       return { ok: false, error: 'pdf: save target not granted to this view' }
     }
     const target = typeof request.targetPath === 'string' ? request.targetPath : path
+    if (typeof request.sourceVersion !== 'string' || request.sourceVersion.length === 0) {
+      return { ok: false, error: PDF_SOURCE_VERSION_REQUIRED_ERROR }
+    }
     try {
-      await savePdfToPath(path, target, request)
+      await savePdfToPath(path, target, request, request.sourceVersion)
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
@@ -705,11 +803,13 @@ function registerPdfIpc(): void {
       const other = picked.filePaths[0]
       if (picked.canceled || !other) return { ok: true, canceled: true }
       try {
+        const sourceBytes = await readPdfSourceAtVersion(path, request.sourceVersion)
         const { merged, count } = await insertPdfBytes(
-          new Uint8Array(await readFile(path)),
+          new Uint8Array(sourceBytes),
           new Uint8Array(await readFile(other)),
           typeof afterPageIndex === 'number' ? afterPageIndex : -1,
         )
+        await assertPdfFileAtVersion(path, request.sourceVersion)
         await atomicWriteFile(path, merged)
         return { ok: true, insertedCount: count }
       } catch (err) {
@@ -726,12 +826,14 @@ function registerPdfIpc(): void {
         return { ok: false, error: 'pdf: path not granted to this view' }
       }
       try {
+        const sourceBytes = await readPdfSourceAtVersion(path, request.sourceVersion)
         const { bytes, pageIndex } = await insertBlankPageWithIndex(
-          new Uint8Array(await readFile(path)),
+          new Uint8Array(sourceBytes),
           typeof afterPageIndex === 'number' ? afterPageIndex : -1,
         )
-        // In place on the granted path, atomically: the renderer reloads afterwards, the same
-        // way an inserted merge does. No dialog, no new file.
+        // Recheck before atomicWriteFile stages the replacement; another writer can still land
+        // during staging, before the atomic rename.
+        await assertPdfFileAtVersion(path, request.sourceVersion)
         await atomicWriteFile(path, bytes)
         return { ok: true, pageIndex }
       } catch (err) {
@@ -754,12 +856,14 @@ function registerPdfIpc(): void {
         return { ok: false, error: 'pdf: wrong duplicate-pages request for this view' }
       }
       try {
+        const sourceBytes = await readPdfSourceAtVersion(path, request.sourceVersion)
         const { bytes, count } = await duplicatePagesWithCount(
-          new Uint8Array(await readFile(path)),
+          new Uint8Array(sourceBytes),
           pageIndices,
         )
         // Nothing valid to copy: leave the file alone instead of rewriting identical bytes
         if (count === 0) return { ok: true, count }
+        await assertPdfFileAtVersion(path, request.sourceVersion)
         await atomicWriteFile(path, bytes)
         return { ok: true, count }
       } catch (err) {
@@ -848,7 +952,7 @@ function registerPdfIpc(): void {
   ipcMain.handle(
     PDF_CHANNELS.sanitizePdf,
     async (e, request: SanitizePdfRequest): Promise<SanitizeResult> => {
-      const { path, ...categories } = request ?? {}
+      const { path, sourceVersion, ...categories } = request ?? {}
       if (
         typeof path !== 'string' ||
         !allowedByWc.get(e.sender.id)?.has(path) ||
@@ -858,10 +962,12 @@ function registerPdfIpc(): void {
         return { ok: false, error: 'pdf: wrong sanitize request for this view' }
       }
       try {
-        const result = await sanitizePdfBytes(new Uint8Array(await readFile(path)), categories)
+        const sourceBytes = await readPdfSourceAtVersion(path, sourceVersion)
+        const result = await sanitizePdfBytes(new Uint8Array(sourceBytes), categories)
         if (!result) return { ok: false, error: 'pdf: nothing selected to remove' }
         // In place on the granted path, atomically: the renderer reloads the document afterwards,
         // the same way an inserted merge does
+        await assertPdfFileAtVersion(path, sourceVersion)
         await atomicWriteFile(path, result.bytes)
         return { ok: true, report: result.report }
       } catch (err) {
@@ -902,7 +1008,9 @@ function registerPdfIpc(): void {
       try {
         // In place on the granted path; the renderer reloads the document afterwards, just
         // like sanitize does, so the panel refetches what the file now holds
-        const bytes = await deleteAnnotsBytes(new Uint8Array(await readFile(path)), targets)
+        const sourceBytes = await readPdfSourceAtVersion(path, request.sourceVersion)
+        const bytes = await deleteAnnotsBytes(new Uint8Array(sourceBytes), targets)
+        await assertPdfFileAtVersion(path, request.sourceVersion)
         await atomicWriteFile(path, bytes)
         return { ok: true }
       } catch (err) {
@@ -931,12 +1039,15 @@ function registerPdfIpc(): void {
         return { ok: false, error: 'pdf: wrong outline request for this view' }
       }
       try {
-        const pdfDoc = await PDFDocument.load(new Uint8Array(await readFile(path)), {
+        const sourceBytes = await readPdfSourceAtVersion(path, request.sourceVersion)
+        const pdfDoc = await PDFDocument.load(new Uint8Array(sourceBytes), {
           updateMetadata: false,
         })
         // An empty list clears the sidebar entirely, which is what deleting every bookmark wants
         applyOutline(pdfDoc, nodes)
-        await atomicWriteFile(path, await pdfDoc.save({ useObjectStreams: false }))
+        const bytes = await pdfDoc.save({ useObjectStreams: false })
+        await assertPdfFileAtVersion(path, request.sourceVersion)
+        await atomicWriteFile(path, bytes)
         return { ok: true }
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -974,14 +1085,16 @@ function registerPdfIpc(): void {
       }
       try {
         // In place on the granted path; the renderer reloads and re-runs the report after it applies
+        const sourceBytes = await readPdfSourceAtVersion(path, request.sourceVersion)
         const result = await fixA11yMetadataBytes(
-          new Uint8Array(await readFile(path)),
+          new Uint8Array(sourceBytes),
           // The file name is the honest default for a missing title, no extension
           path.replace(/^.*[/\\]/, '').replace(/\.pdf$/i, ''),
           lang,
         )
         // Nothing was missing: do not rewrite the file just to spin it
         if (result.fixed === 0) return { ok: true, fixed: 0 }
+        await assertPdfFileAtVersion(path, request.sourceVersion)
         await atomicWriteFile(path, result.bytes)
         return { ok: true, fixed: result.fixed }
       } catch (err) {
@@ -1076,11 +1189,17 @@ function registerPdfIpc(): void {
   )
 
   ipcMain.handle(
-    PDF_CHANNELS.exportImages,
-    async (e, request: ExportImagesRequest): Promise<ExportImagesResult> => {
-      const { images, pageNumbers, baseName } = request ?? {}
-      if (!Array.isArray(images) || images.length === 0)
-        return { ok: false, error: 'pdf: no images' }
+    PDF_CHANNELS.beginExportImages,
+    async (e, request: BeginExportImagesRequest): Promise<BeginExportImagesResult> => {
+      const { pageNumbers, baseName } = request ?? {}
+      if (
+        !Array.isArray(pageNumbers) ||
+        pageNumbers.length === 0 ||
+        pageNumbers.some((n) => !Number.isSafeInteger(n) || n < 1)
+      ) {
+        return { ok: false, error: 'pdf: invalid PNG export pages' }
+      }
+      const safeBase = String(baseName || 'page').replace(/[/\\:*?"<>|]/g, '_')
       const win =
         BrowserWindow.fromWebContents(e.sender) ?? BrowserWindow.getFocusedWindow() ?? undefined
       const picked = await showOpenDialogWithMemory(dialog, win, {
@@ -1089,36 +1208,83 @@ function registerPdfIpc(): void {
       })
       const dir = picked.filePaths[0]
       if (picked.canceled || !dir) return { ok: true, canceled: true }
-      const safeBase = String(baseName || 'page').replace(/[/\\:*?"<>|]/g, '_')
-      const paths = images.map((_, i) => join(dir, `${safeBase}-p${pageNumbers?.[i] ?? i + 1}.png`))
-      const originals = new Map<string, Buffer | undefined>()
-      const written = new Set<string>()
+      const paths = pageNumbers.map((pageNumber) => join(dir, `${safeBase}-p${pageNumber}.png`))
+      if (new Set(paths).size !== paths.length) {
+        return { ok: false, error: 'pdf: duplicate PNG export page number' }
+      }
+      const clash = paths.find((path) => existsSync(path))
+      if (clash) return { ok: false, error: `pdf: file already exists: ${clash}` }
+
+      const exportId = randomUUID()
+      const sessions = pngExportsByWc.get(e.sender.id) ?? new Map<string, PngExportSession>()
+      sessions.set(exportId, { dir, paths, published: [], nextIndex: 0, closed: false })
+      pngExportsByWc.set(e.sender.id, sessions)
+      return { ok: true, exportId, savedDir: dir, count: paths.length }
+    },
+  )
+
+  ipcMain.handle(
+    PDF_CHANNELS.writeExportImage,
+    async (e, request: WriteExportImageRequest): Promise<WriteExportImageResult> => {
+      const { exportId, index, image } = request ?? {}
+      const session = getPngExport(e.sender.id, exportId)
+      if (typeof exportId !== 'string' || !session) {
+        return { ok: false, error: 'pdf: PNG export session not found for this view' }
+      }
+      if (
+        session.closed ||
+        session.pendingWrite ||
+        index !== session.nextIndex ||
+        typeof image !== 'string'
+      ) {
+        await abortPngExport(e.sender.id, exportId, session)
+        return { ok: false, error: 'pdf: invalid PNG export page' }
+      }
+      const path = session.paths[index]!
+      const publishing = publishPngNoClobber(session, path, Buffer.from(image, 'base64'))
+      session.pendingWrite = publishing
       try {
-        for (const path of new Set(paths)) {
-          try {
-            originals.set(path, await readFile(path))
-          } catch (err) {
-            if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
-            originals.set(path, undefined)
-          }
-        }
-        for (const [i, b64] of images.entries()) {
-          written.add(paths[i])
-          await atomicWriteFile(paths[i], Buffer.from(b64, 'base64'))
-        }
-        return { ok: true, savedDir: dir, count: images.length }
+        await publishing
       } catch (err) {
-        for (const path of written) {
-          try {
-            const original = originals.get(path)
-            if (original === undefined) await unlink(path)
-            else await atomicWriteFile(path, original)
-          } catch {
-            // Preserve the export error; cleanup is best effort.
-          }
-        }
+        session.pendingWrite = undefined
+        await abortPngExport(e.sender.id, exportId, session)
         return { ok: false, error: err instanceof Error ? err.message : String(err) }
       }
+      session.pendingWrite = undefined
+      if (session.closed || getPngExport(e.sender.id, exportId) !== session) {
+        await removePngExport(session)
+        return { ok: false, error: 'pdf: PNG export session ended' }
+      }
+      session.nextIndex++
+      return { ok: true }
+    },
+  )
+
+  ipcMain.handle(
+    PDF_CHANNELS.finishExportImages,
+    async (e, request: FinishExportImagesRequest): Promise<FinishExportImagesResult> => {
+      const { exportId } = request ?? {}
+      const session = getPngExport(e.sender.id, exportId)
+      if (typeof exportId !== 'string' || !session) {
+        return { ok: false, error: 'pdf: PNG export session not found for this view' }
+      }
+      if (session.nextIndex !== session.paths.length) {
+        await abortPngExport(e.sender.id, exportId, session)
+        return { ok: false, error: 'pdf: PNG export is incomplete' }
+      }
+      forgetPngExport(e.sender.id, exportId)
+      return { ok: true, savedDir: session.dir, count: session.paths.length }
+    },
+  )
+
+  ipcMain.handle(
+    PDF_CHANNELS.cancelExportImages,
+    async (e, request: CancelExportImagesRequest): Promise<CancelExportImagesResult> => {
+      const { exportId } = request ?? {}
+      const session = getPngExport(e.sender.id, exportId)
+      if (typeof exportId !== 'string' || !session) return { ok: true }
+      await abortPngExport(e.sender.id, exportId, session)
+      return { ok: true }
     },
   )
   ipcMain.on(PDF_CHANNELS.dirtyChanged, (e, dirty: unknown) => {
@@ -1169,6 +1335,9 @@ function grantAndTrack(wc: WebContents, openPath?: string | null): void {
     dirtyByWc.delete(wcId)
     readyByWc.delete(wcId)
     closeWatch(wcId)
+    const pngExports = pngExportsByWc.get(wcId)
+    pngExportsByWc.delete(wcId)
+    if (pngExports) for (const session of pngExports.values()) void removePngExport(session)
     closeSaveWaiters.get(wcId)?.(false)
     closeSaveWaiters.delete(wcId)
     closePromptWaiters.get(wcId)?.(false)

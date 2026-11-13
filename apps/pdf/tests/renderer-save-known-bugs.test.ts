@@ -14,7 +14,7 @@ async function harness(
   failReload: boolean,
   deferPicker = false,
   hostWarning?: string,
-  failWrite = false,
+  failWrite: boolean | string = false,
 ) {
   const pdf = await PDFDocument.create()
   pdf.addPage([100, 100])
@@ -41,7 +41,11 @@ async function harness(
       rotations: { pageIndex: number; delta: number }[]
     }) => {
       if (++writes === 1 && !failReload) await gate
-      if (writeFails) return { ok: false, error: 'synthetic write failure' }
+      if (writeFails)
+        return {
+          ok: false,
+          error: typeof writeFails === 'string' ? writeFails : 'synthetic write failure',
+        }
       const doc = await PDFDocument.load(files.get(request.path)!)
       for (const r of request.rotations) {
         const page = doc.getPage(r.pageIndex)
@@ -82,6 +86,7 @@ async function harness(
       state = typeof update === 'function' ? update(state) : update
     },
     lastSaveAtRef: { current: 0 },
+    sourceVersionForCurrentPath: () => 'displayed-source-version',
     editsPayload: () => ({ rotations: reconciled ? [] : [{ pageIndex: 0, delta: 90 }] }),
     opFailed: (error: string, kind: 'save' | 'operation' = 'operation') => {
       saveError = error
@@ -136,6 +141,7 @@ async function harness(
     allowWrites: () => {
       writeFails = false
     },
+    isReconciled: () => reconciled,
     directOperationRef: ctx.directOperationRef,
     pendingReconcileRef: ctx.pendingReconcileRef as { current: { path: string } | null },
   }
@@ -292,4 +298,30 @@ it('retries an actual write failure rather than treating it as a refresh failure
   expect(await h.save()).toBe(true)
   expect(h.writes()).toBe(2)
   expect(await h.rotation('A')).toBe(90)
+})
+
+it('keeps the pending rotation after a Save conflict so it can be recovered', async () => {
+  const h = await harness(false, false, undefined, 'pdf: file changed on disk')
+  const saving = h.save()
+  h.release()
+  expect(await saving).toBe(false)
+  expect(h.isReconciled()).toBe(false)
+  expect(await h.rotation('A')).toBe(0)
+
+  h.allowWrites()
+  expect(await h.save()).toBe(true)
+  expect(await h.rotation('A')).toBe(90)
+})
+
+it('keeps the pending rotation after a Save As conflict so it can be recovered', async () => {
+  const h = await harness(false, false, undefined, 'pdf: file changed on disk')
+  h.release()
+  await h.saveAs()
+  expect(h.isReconciled()).toBe(false)
+  expect(h.hasFile('B')).toBe(false)
+  expect(await h.rotation('A')).toBe(0)
+
+  h.allowWrites()
+  await h.saveAs()
+  expect(await h.rotation('B')).toBe(90)
 })

@@ -25,6 +25,8 @@ interface LaunchOptions {
   lang?: string
   /** absolute PDF path passed as argv, opened in a PDF tab on launch */
   openFile?: string
+  /** working directory inherited by the app process */
+  cwd?: string
   /** if true, start with empty settings to test onboarding flow */
   testOnboarding?: boolean
   /** simulate an update in the unpacked app */
@@ -82,6 +84,7 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
   const app = await electron.launch({
     executablePath,
     args,
+    cwd: options.cwd,
     env: {
       ...hostEnv,
       ARAREADER_USER_DATA: userDataDir,
