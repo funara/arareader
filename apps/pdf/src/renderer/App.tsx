@@ -3560,6 +3560,7 @@ export default function App() {
       }
       if (e.key === 'Escape') {
         // The palette swallows its own Escape; this covers a grid/dialog opened behind it
+        if (readMode) e.preventDefault()
         if (readMode && searchOpen) closeSearch()
         else if (readMode) setReadMode(false)
         else if (paletteOpen) setPaletteOpen(false)
@@ -5110,6 +5111,7 @@ export default function App() {
                   <button
                     className={`rb-big${isFullscreen ? ' active' : ''}`}
                     title={t('fullscreen')}
+                    aria-pressed={isFullscreen}
                     onClick={toggleFullscreen}
                   >
                     <span className="rb-big-icon">
@@ -6281,75 +6283,6 @@ export default function App() {
         />
       )}
       <footer className="status-bar">
-        <div className="status-left">
-          <span className="status-item">
-            {t('appPageOf', { current: currentPage, total: pageCount })}
-          </span>
-        </div>
-        <div className="status-right">
-          <button
-            className="zoom-btn"
-            title={`${t('zoomOut')} (${kbdHint('-')})`}
-            onClick={zoomOut}
-          >
-            −
-          </button>
-          <input
-            className="zoom-slider"
-            type="range"
-            min={MIN_SCALE * 100}
-            max={MAX_SCALE * 100}
-            step={5}
-            value={Math.round(scale * 100)}
-            onChange={(e) => applyScale(Number(e.target.value) / 100, null)}
-          />
-          <button className="zoom-btn" title={`${t('zoomIn')} (${kbdHint('+')})`} onClick={zoomIn}>
-            +
-          </button>
-          <span className="zoom-value">{Math.round(scale * 100)}%</span>
-        </div>
-        <div className="status-view-switch" role="group" aria-label={t('viewMode')}>
-          <button
-            type="button"
-            className={`status-view-btn${viewMode === 'continuous' ? ' active' : ''}`}
-            title={t('continuousView')}
-            aria-label={t('continuousView')}
-            aria-pressed={viewMode === 'continuous'}
-            onClick={() => switchViewMode('continuous')}
-          >
-            <IconContinuous size={14} />
-          </button>
-          <button
-            type="button"
-            className={`status-view-btn${viewMode === 'paged' ? ' active' : ''}`}
-            title={t('pagedView')}
-            aria-label={t('pagedView')}
-            aria-pressed={viewMode === 'paged'}
-            onClick={() => switchViewMode('paged')}
-          >
-            <IconPaged size={14} />
-          </button>
-          <button
-            type="button"
-            className={`status-view-btn${spread === 1 ? ' active' : ''}`}
-            title={t('singlePage')}
-            aria-label={t('singlePage')}
-            aria-pressed={spread === 1}
-            onClick={() => setSpread(1)}
-          >
-            <IconSinglePage />
-          </button>
-          <button
-            type="button"
-            className={`status-view-btn${spread === 2 ? ' active' : ''}`}
-            title={t('twoPage')}
-            aria-label={t('twoPage')}
-            aria-pressed={spread === 2}
-            onClick={() => setSpread(2)}
-          >
-            <IconSpread />
-          </button>
-        </div>
         <div className="status-file">
           <span className="ribbon-file" title={filePath}>
             {fileName}
@@ -6369,6 +6302,149 @@ export default function App() {
             </span>
           )}
           {saveState === 'saved' && <span className="tb-save-ok">{t('savedOk')}</span>}
+        </div>
+        <div className="status-left">
+          <button
+            type="button"
+            className="status-page-btn"
+            aria-label={t('searchPrev')}
+            title={t('searchPrev')}
+            disabled={pageCount === 0 || currentPage <= spread}
+            onClick={() => scrollToPage(stepPage(visList, spread, currentPage, -1))}
+          >
+            ‹
+          </button>
+          <span className="status-item">
+            <input
+              key={currentPage}
+              aria-label={t('appPageOf', { current: currentPage, total: pageCount })}
+              inputMode="numeric"
+              defaultValue={currentPage}
+              disabled={pageCount === 0}
+              onBlur={(event) => {
+                const value = event.currentTarget.value
+                const page = /^\d+$/.test(value)
+                  ? Math.min(pageCount, Math.max(1, Number(value)))
+                  : currentPage
+                event.currentTarget.value = String(page)
+                scrollToPage(page)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') event.currentTarget.blur()
+              }}
+            />
+            <span> / {pageCount}</span>
+          </span>
+          <button
+            type="button"
+            className="status-page-btn"
+            aria-label={t('searchNext')}
+            title={t('searchNext')}
+            disabled={
+              pageCount === 0 ||
+              pageRow(currentPage, pageCount, spread) >= pageRow(pageCount, pageCount, spread)
+            }
+            onClick={() => scrollToPage(stepPage(visList, spread, currentPage, 1))}
+          >
+            ›
+          </button>
+        </div>
+        <div className="status-controls">
+          <div className="status-right">
+            <button
+              className="zoom-btn"
+              title={`${t('zoomOut')} (${kbdHint('-')})`}
+              onClick={zoomOut}
+            >
+              −
+            </button>
+            <input
+              className="zoom-slider"
+              aria-label={t('ribbonZoom')}
+              type="range"
+              min={MIN_SCALE * 100}
+              max={MAX_SCALE * 100}
+              step={5}
+              value={Math.round(scale * 100)}
+              onChange={(e) => applyScale(Number(e.target.value) / 100, null)}
+            />
+            <button
+              className="zoom-btn"
+              title={`${t('zoomIn')} (${kbdHint('+')})`}
+              onClick={zoomIn}
+            >
+              +
+            </button>
+            <span className="zoom-value">{Math.round(scale * 100)}%</span>
+          </div>
+          <details
+            className="status-view-menu"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape' && event.currentTarget.open) {
+                event.stopPropagation()
+                event.currentTarget.open = false
+                event.currentTarget.querySelector('summary')?.focus()
+              }
+            }}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+                event.currentTarget.open = false
+            }}
+          >
+            <summary>{t('viewMode')}</summary>
+            <div className="status-view-switch" role="group" aria-label={t('viewMode')}>
+              <button
+                type="button"
+                className={`status-view-btn${viewMode === 'continuous' ? ' active' : ''}`}
+                title={t('continuousView')}
+                aria-label={t('continuousView')}
+                aria-pressed={viewMode === 'continuous'}
+                onClick={() => switchViewMode('continuous')}
+              >
+                <IconContinuous size={14} /> {t('continuousView')}
+              </button>
+              <button
+                type="button"
+                className={`status-view-btn${viewMode === 'paged' ? ' active' : ''}`}
+                title={t('pagedView')}
+                aria-label={t('pagedView')}
+                aria-pressed={viewMode === 'paged'}
+                onClick={() => switchViewMode('paged')}
+              >
+                <IconPaged size={14} /> {t('pagedView')}
+              </button>
+              <button
+                type="button"
+                className={`status-view-btn${spread === 1 ? ' active' : ''}`}
+                title={t('singlePage')}
+                aria-label={t('singlePage')}
+                aria-pressed={spread === 1}
+                onClick={() => setSpread(1)}
+              >
+                <IconSinglePage /> {t('singlePage')}
+              </button>
+              <button
+                type="button"
+                className={`status-view-btn${spread === 2 ? ' active' : ''}`}
+                title={t('twoPage')}
+                aria-label={t('twoPage')}
+                aria-pressed={spread === 2}
+                onClick={() => setSpread(2)}
+              >
+                <IconSpread /> {t('twoPage')}
+              </button>
+            </div>
+          </details>
+          <button
+            type="button"
+            className={`status-view-btn${isFullscreen ? ' active' : ''}`}
+            title={t('fullscreen')}
+            aria-label={t('fullscreen')}
+            aria-pressed={isFullscreen}
+            onClick={toggleFullscreen}
+          >
+            <IconFullscreen />
+          </button>
         </div>
       </footer>
       {saveState === 'error' && status === 'ready' && !organizeOpen && (

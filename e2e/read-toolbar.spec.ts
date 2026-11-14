@@ -5,6 +5,89 @@ import { PDFDocument } from 'pdf-lib'
 import { expect, test } from '@playwright/test'
 import { closeReader, launchApp, screenshotPath, waitForPageWithUrl } from './helpers'
 
+test('Read mode owns fullscreen only when it enters it and restores it across tabs', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'arareader-read-fullscreen-'))
+  const path = join(dir, 'document.pdf')
+  const fixture = await PDFDocument.create()
+  fixture.addPage([612, 792])
+  await writeFile(path, await fixture.save())
+  const launched = await launchApp({ openFile: path })
+  try {
+    const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
+    const fullscreen = () =>
+      launched.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isFullScreen())
+    const setWindowFullscreen = (enabled: boolean) =>
+      launched.app.evaluate(
+        ({ BrowserWindow }, value) => BrowserWindow.getAllWindows()[0].setFullScreen(value),
+        enabled,
+      )
+    const bounds = () =>
+      launched.app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0].contentView.children[0].getBounds(),
+      )
+    const enter = pdf.locator('.ribbon-mode-group button[title="Read mode"]')
+    const toolbar = pdf.locator('.read-toolbar')
+    const close = toolbar.getByRole('button', { name: 'Exit Read mode' })
+    await expect.poll(fullscreen).toBe(false)
+    await enter.click()
+    await expect.poll(fullscreen).toBe(true)
+    await expect.poll(async () => (await bounds()).y).toBe(0)
+    await pdf.screenshot({ path: screenshotPath('read-fullscreen') })
+    await toolbar.getByRole('button', { name: 'View mode' }).click()
+    await pdf.keyboard.press('Escape')
+    await expect(toolbar).toBeVisible()
+    await expect.poll(fullscreen).toBe(true)
+    await pdf.keyboard.press('Escape')
+    await expect(toolbar).toHaveCount(0)
+    await expect.poll(fullscreen).toBe(false)
+    await expect.poll(async () => (await bounds()).y).toBe(40)
+
+    await pdf.locator('.status-bar').getByRole('button', { name: 'Full Screen' }).click()
+    await expect.poll(fullscreen).toBe(true)
+    await enter.click()
+    await expect(toolbar).toBeVisible()
+    await close.click()
+    await expect(toolbar).toHaveCount(0)
+    await expect.poll(fullscreen).toBe(true)
+    await enter.click()
+    await expect(toolbar).toBeVisible()
+    await pdf.keyboard.press('Escape')
+    await expect(toolbar).toHaveCount(0)
+    await expect.poll(fullscreen).toBe(true)
+    await pdf.locator('.status-bar').getByRole('button', { name: 'Full Screen' }).click()
+    await expect.poll(fullscreen).toBe(false)
+
+    await enter.click()
+    await expect.poll(fullscreen).toBe(true)
+    await setWindowFullscreen(false)
+    await expect.poll(fullscreen).toBe(false)
+    await expect(toolbar).toBeVisible()
+    await expect.poll(async () => (await bounds()).y).toBe(40)
+    await setWindowFullscreen(true)
+    await expect.poll(fullscreen).toBe(true)
+    await close.click()
+    await expect(toolbar).toHaveCount(0)
+    await expect.poll(fullscreen).toBe(true)
+    await setWindowFullscreen(false)
+    await expect.poll(fullscreen).toBe(false)
+
+    await enter.click()
+    await expect.poll(fullscreen).toBe(true)
+    const id = await launched.page.evaluate(
+      async () => (await window.readerTabs.list()).find((tab) => tab.active)!.id,
+    )
+    await launched.page.evaluate(() => window.readerTabs.activate('home'))
+    await expect.poll(fullscreen).toBe(false)
+    await launched.page.evaluate((tabId) => window.readerTabs.activate(tabId), id)
+    await expect.poll(fullscreen).toBe(true)
+    await expect(toolbar).toBeVisible()
+    await launched.page.evaluate((tabId) => window.readerTabs.close(tabId), id)
+    await expect.poll(fullscreen).toBe(false)
+  } finally {
+    await closeReader(launched)
+  }
+})
+
 test('Read mode floating toolbar hides only when idle and keeps reading controls usable', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'arareader-read-toolbar-'))
   const path = join(dir, 'document.pdf')

@@ -1243,6 +1243,102 @@ test.describe('direct content editing', () => {
 })
 
 test.describe('view modes', () => {
+  test('footer navigation and view controls remain usable in a narrow window', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'arareader-footer-layout-'))
+    const name = 'a-very-long-document-name-for-the-footer-layout-check.pdf'
+    const path = join(dir, name)
+    await writeTestPdf(path, 3)
+    const launched = await launchApp({ openFile: path })
+    try {
+      const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
+      const footer = pdf.locator('.status-bar')
+      const previous = footer.getByRole('button', { name: 'Previous' })
+      const next = footer.getByRole('button', { name: 'Next' })
+      const page = footer.locator('.status-item input')
+      await expect(previous).toBeDisabled()
+      await next.click()
+      await expect(page).toHaveValue('2')
+      await page.fill('3')
+      await page.press('Enter')
+      await expect(next).toBeDisabled()
+      await previous.click()
+      await expect(page).toHaveValue('2')
+      await pdf.setViewportSize({ width: 320, height: 700 })
+      await expect(footer.locator('.ribbon-file')).toHaveAttribute('title', path)
+      await expect(footer.locator('.zoom-slider')).toBeInViewport({ ratio: 1 })
+      await expect(footer.getByRole('button', { name: 'Full Screen' })).toBeInViewport({ ratio: 1 })
+      expect(await footer.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
+      const viewMenu = footer.locator('summary')
+      await viewMenu.click()
+      for (const label of ['Continuous', 'Single page', 'Two pages']) {
+        await expect(footer.getByRole('button', { name: label, exact: true })).toBeVisible()
+      }
+      await pdf.keyboard.press('Escape')
+      await expect(viewMenu).toBeFocused()
+      await viewMenu.evaluate((el) => {
+        el.textContent = 'Mode d’affichage'
+      })
+      for (const width of [820, 900, 1024]) {
+        await pdf.setViewportSize({ width, height: 700 })
+        const overlaps = await footer.evaluate((el) => {
+          const groups = [
+            '.status-file',
+            '.status-left',
+            '.status-right',
+            '.status-view-menu',
+            '.status-controls > button',
+          ].map((selector) => el.querySelector(selector)!.getBoundingClientRect())
+          return groups.some((a, i) =>
+            groups
+              .slice(i + 1)
+              .some(
+                (b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom,
+              ),
+          )
+        })
+        expect(overlaps, `footer groups overlap at ${width}px`).toBe(false)
+      }
+    } finally {
+      await closeReader(launched)
+    }
+  })
+
+  test('footer fullscreen control enters and exits fullscreen in sync with the View ribbon', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'arareader-footer-fullscreen-'))
+    const path = join(dir, 'document.pdf')
+    await writeTestPdf(path, 1)
+    const launched = await launchApp({ openFile: path })
+    try {
+      const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
+      const footer = pdf.locator('.status-bar')
+      const fullscreen = footer.getByRole('button', { name: 'Full Screen' })
+      await expect(fullscreen).toHaveAttribute('aria-pressed', 'false')
+      await pdf.locator('.ribbon-tab', { hasText: 'View' }).click()
+      const ribbon = pdf.locator('.ribbon-body').getByRole('button', { name: 'Full Screen' })
+      await expect(ribbon).toHaveAttribute('aria-pressed', 'false')
+      await footer.screenshot({ path: screenshotPath('footer-fullscreen-light') })
+      await pdf.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'))
+      await footer.screenshot({ path: screenshotPath('footer-fullscreen-dark') })
+      await fullscreen.click()
+      await expect(fullscreen).toHaveAttribute('aria-pressed', 'true')
+      await expect(ribbon).toHaveAttribute('aria-pressed', 'true')
+      await ribbon.click()
+      await expect(fullscreen).toHaveAttribute('aria-pressed', 'false')
+      await expect(ribbon).toHaveAttribute('aria-pressed', 'false')
+      await ribbon.click()
+      await expect(fullscreen).toHaveAttribute('aria-pressed', 'true')
+      await fullscreen.click()
+      await expect(ribbon).toHaveAttribute('aria-pressed', 'false')
+      await expect(fullscreen).toHaveAttribute('aria-pressed', 'false')
+      await pdf.setViewportSize({ width: 320, height: 700 })
+      await expect(fullscreen).toBeInViewport({ ratio: 1 })
+      await expect(fullscreen).toBeVisible()
+      await footer.screenshot({ path: screenshotPath('footer-fullscreen-narrow') })
+    } finally {
+      await closeReader(launched)
+    }
+  })
+
   test('footer page layout switch works in Select and Edit and stays in sync with Read mode', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'arareader-footer-spread-'))
     const path = join(dir, 'document.pdf')
@@ -1252,6 +1348,8 @@ test.describe('view modes', () => {
       const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
       await pdf.setViewportSize({ width: 980, height: 700 })
       const footer = pdf.locator('.status-view-switch')
+      const viewMenu = pdf.locator('.status-view-menu summary')
+      await viewMenu.click()
       const single = footer.getByRole('button', { name: 'Single page' })
       const dual = footer.getByRole('button', { name: 'Two pages' })
       await expect(single).toBeVisible({ timeout: 3000 })
@@ -1264,12 +1362,14 @@ test.describe('view modes', () => {
       await expect(dual).toHaveAttribute('aria-pressed', 'true')
       await expect(pdf.locator('.pdf-row').first().locator('.pdf-page')).toHaveCount(2)
       await pdf.locator('.ribbon-mode-group button[title="Edit PDF"]').click()
+      await viewMenu.click()
       await expect(dual).toHaveAttribute('aria-pressed', 'true')
       await single.click()
       await expect(single).toHaveAttribute('aria-pressed', 'true')
       await expect(pdf.locator('.pdf-row').first().locator('.pdf-page')).toHaveCount(1)
       await pdf.locator('.ribbon-tab', { hasText: 'View' }).click()
       await pdf.locator('.rb-big[title="Two pages"]').click()
+      await viewMenu.click()
       await expect(dual).toHaveAttribute('aria-pressed', 'true')
       await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
       await pdf.locator('.read-toolbar').getByRole('button', { name: 'View mode' }).click()
@@ -1337,7 +1437,7 @@ test.describe('view modes', () => {
 
       // Enter paged mode from page 3: the page on screen carries over
       await pdf.locator('.pdf-thumb').nth(2).click()
-      await expect(pdf.locator('.status-item')).toContainText('Page 3 of 3')
+      await expect(pdf.locator('.status-item input')).toHaveValue('3')
       await pdf.locator('.ribbon-tab', { hasText: 'View' }).click()
       const paged = pdf.locator('.rb-big[title="Page by page"]')
       await paged.click()
@@ -1378,13 +1478,14 @@ test.describe('view modes', () => {
 
       // Footer switch: back to continuous, then paged again for Read mode
       const footerSwitch = pdf.locator('.status-view-switch')
+      await pdf.locator('.status-view-menu summary').click()
       await footerSwitch.locator('[title="Continuous"]').click()
       await expect(footerSwitch.locator('[title="Continuous"]')).toHaveAttribute(
         'aria-pressed',
         'true',
       )
       await expect(pdf.locator('.pdf-page')).toHaveCount(3)
-      await expect(pdf.locator('.status-item')).toContainText('Page 3 of 3')
+      await expect(pdf.locator('.status-item input')).toHaveValue('3')
       await footerSwitch.locator('[title="Page by page"]').click()
       await expect(pdf.locator('.pdf-page:visible')).toHaveAttribute('data-orig-idx', '2')
       await pdf.screenshot({ path: screenshotPath('pdf-view-switch-footer') })
@@ -1543,7 +1644,7 @@ test.describe('organize, palette and external rebuilds', () => {
 
       // The watcher (debounced) reloads the clean reader; both the sidebar and status bar follow
       await expect(pdf.locator('.pdf-thumb')).toHaveCount(2, { timeout: 20_000 })
-      await expect(pdf.locator('.status-left')).toContainText('of 2')
+      await expect(pdf.locator('.status-item')).toContainText('/ 2')
       await pdf.screenshot({ path: screenshotPath('pdf-auto-reload') })
     } finally {
       await closeReader(launched)

@@ -30,6 +30,8 @@ export class TabManager {
   private readonly tabs: TabRecord[] = [{ id: HOME_ID, kind: 'home', view: null, title: 'Home' }]
   private activeId: string = HOME_ID
   private nextId = 1
+  private readFullscreenOwned = false
+  private readFullscreenTransition: 'enter' | 'leave' | null = null
   /** tabs mid unsaved-changes prompt, so a second close click doesn't stack dialogs */
   private readonly closingIds = new Set<string>()
 
@@ -47,11 +49,55 @@ export class TabManager {
     this.window.on('focus', () => this.layout(true))
     this.window.on('show', () => this.layout(true))
     this.window.on('restore', () => this.layout(true))
+    this.window.on('enter-full-screen', () => {
+      if (this.readFullscreenTransition !== 'enter') {
+        this.layout()
+        return
+      }
+      // Electron can emit the event before isFullScreen() reflects the new state.
+      setImmediate(() => {
+        if (this.window.isDestroyed() || this.readFullscreenTransition !== 'enter') return
+        this.readFullscreenTransition = null
+        this.syncReadFullscreen()
+      })
+    })
+    this.window.on('leave-full-screen', () => {
+      if (this.readFullscreenTransition === 'leave') {
+        setImmediate(() => {
+          if (this.window.isDestroyed() || this.readFullscreenTransition !== 'leave') return
+          this.readFullscreenTransition = null
+          this.readFullscreenOwned = false
+          this.syncReadFullscreen()
+        })
+      } else {
+        this.readFullscreenTransition = null
+        this.readFullscreenOwned = false
+        this.layout()
+      }
+    })
   }
 
   private contentBounds(): Rectangle {
     const { width, height } = this.window.getContentBounds()
-    return { x: 0, y: TAB_STRIP_HEIGHT, width, height: Math.max(0, height - TAB_STRIP_HEIGHT) }
+    const top = this.activeTab()?.reading && this.window.isFullScreen() ? 0 : TAB_STRIP_HEIGHT
+    return { x: 0, y: top, width, height: Math.max(0, height - top) }
+  }
+
+  private syncReadFullscreen(): void {
+    if (this.readFullscreenTransition) {
+      this.layout()
+      return
+    }
+    const reading = this.activeTab()?.reading
+    if (reading && !this.window.isFullScreen()) {
+      this.readFullscreenOwned = true
+      this.readFullscreenTransition = 'enter'
+      this.window.setFullScreen(true)
+    } else if (!reading && this.readFullscreenOwned) {
+      this.readFullscreenTransition = 'leave'
+      this.window.setFullScreen(false)
+    }
+    this.layout()
   }
 
   private activeTab(): TabRecord | undefined {
@@ -136,6 +182,8 @@ export class TabManager {
     for (const tab of this.tabs) {
       if (tab.id !== id) tab.view?.setVisible(false)
     }
+    this.activeId = id
+    this.syncReadFullscreen()
     if (target.view) {
       const bounds = this.contentBounds()
       this.attachView(target.view)
@@ -143,7 +191,6 @@ export class TabManager {
       target.view.setBounds(bounds)
       target.view.setVisible(true)
     }
-    this.activeId = id
     this.onChanged()
   }
 
@@ -151,6 +198,7 @@ export class TabManager {
     const tab = this.tabs.find((item) => item.view?.webContents.id === webContentsId)
     if (!tab || tab.reading === reading) return
     tab.reading = reading
+    if (tab.id === this.activeId) this.syncReadFullscreen()
     this.onChanged()
   }
 

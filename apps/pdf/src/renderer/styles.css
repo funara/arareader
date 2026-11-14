@@ -3327,11 +3327,12 @@ textarea {
 
 .status-bar {
   flex-shrink: 0;
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  padding: 0 14px;
-  height: 26px;
+  gap: 12px;
+  padding: 3px 14px;
+  min-height: 32px;
   font-size: 11.5px;
   color: var(--text-dim);
   background: var(--chrome-bg);
@@ -3345,23 +3346,40 @@ textarea {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 1;
-  justify-content: flex-end;
   min-width: 0;
-  margin-left: auto;
   overflow: hidden;
 }
 
 .status-file > :not(.ribbon-file) {
   flex-shrink: 0;
 }
-.status-bar {
-  gap: 12px;
+
+.status-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
 }
 
-@media (max-width: 650px) {
-  .zoom-slider {
-    display: none;
+@media (max-width: 1000px) {
+  .status-bar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px 8px;
+  }
+  .status-controls {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+}
+
+@media (max-width: 480px) {
+  .status-controls,
+  .status-right {
+    gap: 4px;
+  }
+  .status-controls .zoom-slider {
+    width: 48px;
   }
 }
 
@@ -3513,15 +3531,34 @@ textarea {
 .status-left {
   display: flex;
   align-items: center;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  gap: 4px;
   white-space: nowrap;
 }
 
 .status-item {
-  margin-right: 14px;
   flex-shrink: 0;
   font-weight: 500;
+}
+
+.status-item input {
+  width: 3em;
+  padding: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface-subtle);
+  color: var(--text);
+  text-align: center;
+  font: inherit;
+}
+
+.status-bar :is(button, input, summary):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.status-bar button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .status-right {
@@ -3531,14 +3568,49 @@ textarea {
   flex-shrink: 0;
 }
 
-.status-view-switch {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  margin-left: 2px;
-  padding-left: 8px;
-  border-left: 1px solid var(--border);
+.status-view-menu {
+  position: relative;
   flex-shrink: 0;
+}
+
+.status-view-menu summary {
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.status-view-menu summary:hover,
+.status-view-menu[open] summary {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.status-view-switch {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  inset-inline-end: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  min-width: max-content;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--popup-shadow);
+}
+
+.status-view-switch .status-view-btn {
+  justify-content: flex-start;
+  gap: 8px;
+  width: auto;
+  height: 30px;
+  padding: 0 8px;
+  font: inherit;
+  white-space: nowrap;
 }
 
 .status-view-btn {
@@ -3568,7 +3640,8 @@ textarea {
   color: var(--accent);
 }
 
-.zoom-btn {
+.zoom-btn,
+.status-page-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3587,7 +3660,8 @@ textarea {
     color 100ms ease;
 }
 
-.zoom-btn:hover {
+.zoom-btn:hover,
+.status-page-btn:hover {
   background: var(--hover);
   color: var(--text);
 }
