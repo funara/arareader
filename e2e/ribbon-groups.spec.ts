@@ -16,19 +16,34 @@ test('every ribbon tab labels its tool groups without clipping or changing the c
     const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
     const ribbon = pdf.locator('.ribbon-body')
     const expected: Record<string, string[]> = {
-      Home: ['Assistant', 'Modes', 'Navigation', 'Editing', 'Pages', 'Document', 'Reload'],
-      AI: ['Assistant', 'Document', 'Pages', 'Document'],
-      Edit: ['Editing', 'Sign / Watermark', 'Document', 'Document'],
-      Comment: ['Markup', 'Note / Text', 'Draw', 'Color', 'Editing', 'Comments'],
-      Organize: [
-        'Organize',
-        'Rotate left / Rotate right',
-        'Pages',
-        'Split PDF / Combine PDFs',
-        'Export',
-        'Document',
+      Home: [
+        'Assistant',
+        'Modes',
+        'Navigation',
+        'Quick tools',
+        'Page management',
+        'Page fit',
+        'File actions',
+        'Reload',
       ],
-      View: ['Modes', 'View mode', 'Fit width / Fit page', 'Zoom', 'Navigation', 'Document'],
+      AI: ['Assistant', 'Document insights', 'Current page', 'Outline', 'Translation'],
+      Edit: [
+        'Text & images',
+        'Sign & stamp',
+        'Document structure',
+        'Privacy & accessibility',
+        'Export',
+      ],
+      Comment: ['Markup', 'Notes & text', 'Draw', 'Color', 'Insert', 'Review'],
+      Organize: [
+        'Page management',
+        'Rotation',
+        'Page insertion',
+        'Split & merge',
+        'Export',
+        'Privacy',
+      ],
+      View: ['Modes', 'Page layout', 'Page fit', 'Zoom', 'Navigation', 'Window', 'File actions'],
     }
     for (const [tab, labels] of Object.entries(expected)) {
       await pdf
@@ -38,6 +53,16 @@ test('every ribbon tab labels its tool groups without clipping or changing the c
       await expect(ribbon).toHaveCSS('height', '72px')
       const groups = ribbon.locator('.ribbon-group[role="group"], .ribbon-modes')
       await expect(groups).toHaveCount(labels.length)
+      const renderedNames = await groups.evaluateAll((elements) =>
+        elements.map(
+          (element) =>
+            element.getAttribute('aria-label') ??
+            document
+              .getElementById(element.getAttribute('aria-labelledby') ?? '')
+              ?.textContent?.trim(),
+        ),
+      )
+      expect(new Set(renderedNames).size).toBe(renderedNames.length)
       for (const [index, label] of labels.entries()) {
         const group = groups.nth(index)
         await expect(group).toHaveAccessibleName(label)
@@ -86,6 +111,46 @@ test('every ribbon tab labels its tool groups without clipping or changing the c
             0,
           )
         }
+      }
+      if (tab === 'Home' || tab === 'AI') {
+        const assistant = ribbon.locator('.ai-entry')
+        const spacing = await assistant.evaluate((button) => {
+          const icon = button.querySelector('.rb-big-icon')!.getBoundingClientRect()
+          const label = button.querySelector('span:last-child')!.getBoundingClientRect()
+          return { gap: label.top - icon.bottom, iconHeight: icon.height }
+        })
+        expect(spacing.gap).toBeGreaterThanOrEqual(5)
+        expect(spacing.iconHeight).toBe(26)
+        await expect(assistant).toHaveAttribute('aria-pressed', /^(true|false)$/)
+      }
+      if (tab === 'AI') {
+        const document = ribbon.getByRole('group', { name: 'Document insights', exact: true })
+        const pages = ribbon.getByRole('group', { name: 'Current page', exact: true })
+        const outline = ribbon.getByRole('group', { name: 'Outline', exact: true })
+        const translation = ribbon.getByRole('group', { name: 'Translation', exact: true })
+        await expect(document.getByRole('button', { name: 'Doc Stats' })).toBeVisible()
+        await expect(pages.getByRole('button', { name: 'Proofread Page' })).toBeVisible()
+        await expect(outline.getByRole('button', { name: 'Auto Outline' })).toBeVisible()
+        await expect(translation.getByRole('button', { name: 'Translate Page' })).toBeVisible()
+      }
+      const membership: Record<string, Record<string, string[]>> = {
+        Home: {
+          'Page management': ['Organize pages'],
+          'Page fit': ['Fit width', 'Fit page'],
+        },
+        Organize: {
+          'Page management': ['Organize pages', 'Duplicate page', 'Extract page…', 'Delete page'],
+          'Page insertion': ['Insert PDF…', 'Insert blank page'],
+        },
+        View: {
+          Window: ['Full Screen'],
+          'File actions': ['Properties', 'Reload'],
+        },
+      }
+      for (const [name, buttons] of Object.entries(membership[tab] ?? {})) {
+        const group = ribbon.getByRole('group', { name, exact: true })
+        const text = await group.locator('button').allTextContents()
+        expect(text.map((value) => value.trim())).toEqual(buttons)
       }
       await pdf
         .locator('.ribbon')

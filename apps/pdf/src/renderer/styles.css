@@ -699,9 +699,21 @@ textarea {
 
 /* AI Assistant Ribbon Entry */
 .rb-big.ai-entry {
+  gap: 5px;
   border-radius: 6px;
   margin: 0 2px;
   color: var(--text);
+}
+
+.rb-big.ai-entry .rb-big-icon,
+.rb-big.ai-entry .rb-big-icon svg {
+  width: 26px;
+  height: 26px;
+}
+
+.rb-big.ai-entry .rb-big-icon {
+  min-height: 26px;
+  padding: 0;
 }
 
 .rb-big.ai-entry:hover:not(:disabled) {
