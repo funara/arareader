@@ -4099,61 +4099,72 @@ export default function App() {
               <div className="ribbon-mode-group">
                 {ribbonTab === 'home' && (
                   <>
-                    <button
-                      className={`rb-big ai-entry${aiCollapsed ? '' : ' active'}`}
-                      title={t('aiOpenAssistant')}
-                      onClick={() => setAiCollapsed((v) => !v)}
+                    <div
+                      className="ribbon-group ribbon-group--standalone"
+                      role="group"
+                      aria-label={t('ribbonAssistant')}
                     >
-                      <span className="rb-big-icon">
-                        <AssistantMark size={26} />
-                      </span>
-                      <span>ARA Assistant</span>
-                    </button>
+                      <button
+                        className={`rb-big ai-entry${aiCollapsed ? '' : ' active'}`}
+                        title={t('aiOpenAssistant')}
+                        onClick={() => setAiCollapsed((v) => !v)}
+                      >
+                        <span className="rb-big-icon">
+                          <AssistantMark size={26} />
+                        </span>
+                        <span>ARA Assistant</span>
+                      </button>
+                    </div>
                     <div className="ribbon-sep" />
                   </>
                 )}
-                <button
-                  className={`rb-big${!editMode ? ' active' : ''}`}
-                  title={t('selectMode')}
-                  aria-pressed={!editMode}
-                  onClick={() => {
-                    setDrawTool(null)
-                    setSelected(null)
-                    setEditMode(false)
-                  }}
-                >
-                  <span className="rb-big-icon">
-                    <IconSelect />
+                <div className="ribbon-modes" role="group" aria-labelledby="ribbon-modes-label">
+                  <button
+                    className={`rb-big${!editMode ? ' active' : ''}`}
+                    title={t('selectMode')}
+                    aria-pressed={!editMode}
+                    onClick={() => {
+                      setDrawTool(null)
+                      setSelected(null)
+                      setEditMode(false)
+                    }}
+                  >
+                    <span className="rb-big-icon">
+                      <IconSelect />
+                    </span>
+                    {t('selectMode')}
+                  </button>
+                  <button
+                    className={`rb-big${editMode ? ' active' : ''}`}
+                    title={t('editPdf')}
+                    aria-pressed={editMode}
+                    disabled={readOnly}
+                    onClick={() => {
+                      setDrawTool(null)
+                      setSelected(null)
+                      setEditMode(true)
+                    }}
+                  >
+                    <span className="rb-big-icon">
+                      <IconEditPdf />
+                    </span>
+                    {t('editModeLabel')}
+                  </button>
+                  <button
+                    className="rb-big"
+                    title={t('readMode')}
+                    aria-pressed={readMode}
+                    onClick={enterReadMode}
+                  >
+                    <span className="rb-big-icon">
+                      <IconRead />
+                    </span>
+                    {t('readModeLabel')}
+                  </button>
+                  <span className="ribbon-modes-label" id="ribbon-modes-label">
+                    {t('modes')}
                   </span>
-                  {t('selectMode')}
-                </button>
-                <button
-                  className={`rb-big${editMode ? ' active' : ''}`}
-                  title={t('editPdf')}
-                  aria-pressed={editMode}
-                  disabled={readOnly}
-                  onClick={() => {
-                    setDrawTool(null)
-                    setSelected(null)
-                    setEditMode(true)
-                  }}
-                >
-                  <span className="rb-big-icon">
-                    <IconEditPdf />
-                  </span>
-                  {t('editModeLabel')}
-                </button>
-                <button
-                  className="rb-big"
-                  title={t('readMode')}
-                  aria-pressed={readMode}
-                  onClick={enterReadMode}
-                >
-                  <span className="rb-big-icon">
-                    <IconRead />
-                  </span>
-                  {t('readModeLabel')}
-                </button>
+                </div>
               </div>
               <div className="ribbon-sep" />
             </>
@@ -4161,7 +4172,7 @@ export default function App() {
           {ribbonTab === 'home' && (
             <>
               {/* Group 1: Find & Navigate */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonNavigation')}>
                 <div className="ribbon-group-items">
                   <button
                     className={`rb-big${sidebar === 'thumbs' ? ' active' : ''}`}
@@ -4199,7 +4210,12 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 3: Quick Edit & Markup */}
-              <div className="ribbon-group" onMouseDown={(e) => e.preventDefault()}>
+              <div
+                className="ribbon-group"
+                role="group"
+                aria-label={t('ribbonEditing')}
+                onMouseDown={(e) => e.preventDefault()}
+              >
                 <div className="ribbon-group-items">
                   <button
                     className="rb-big"
@@ -4292,7 +4308,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 4: Pages & Layout */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonPages')}>
                 <div className="ribbon-group-items">
                   <button className="rb-big" title={t('organizePages')} onClick={openOrganizeGrid}>
                     <span className="rb-big-icon">
@@ -4330,7 +4346,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 5: Document & Output */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonDocument')}>
                 <div className="ribbon-group-items">
                   <button
                     className="rb-big"
@@ -4367,7 +4383,11 @@ export default function App() {
               </div>
               <div className="ribbon-spacer" />
               {/* Group 6: Sync / Reload */}
-              <div className="ribbon-group">
+              <div
+                className="ribbon-group ribbon-group--standalone"
+                role="group"
+                aria-label={t('reloadFromDisk')}
+              >
                 <div className="ribbon-group-items">
                   <button
                     className="rb-big"
@@ -4387,7 +4407,7 @@ export default function App() {
           {ribbonTab === 'edit' && (
             <>
               {/* Group 1: Direct Content Editing */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonEditing')}>
                 <div className="ribbon-group-items">
                   <button
                     className={`rb-big${drawTool === 'freetext' ? ' active' : ''}`}
@@ -4415,7 +4435,11 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 2: Sign & Stamp */}
-              <div className="ribbon-group">
+              <div
+                className="ribbon-group"
+                role="group"
+                aria-label={`${t('sign')} / ${t('watermark')}`}
+              >
                 <div className="ribbon-group-items">
                   <button
                     className={`rb-big${pendingSign ? ' active' : ''}`}
@@ -4443,7 +4467,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 3: Structure & Metadata */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonDocument')}>
                 <div className="ribbon-group-items">
                   <button
                     className={`rb-big${sidebar === 'outline' ? ' active' : ''}`}
@@ -4470,7 +4494,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 4: Protect & Inspect */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonDocument')}>
                 <div className="ribbon-group-items">
                   <button
                     className="rb-big"
@@ -4517,7 +4541,12 @@ export default function App() {
           {ribbonTab === 'comment' && (
             <>
               {/* Group 1: Text Markup */}
-              <div className="ribbon-group" onMouseDown={(e) => e.preventDefault()}>
+              <div
+                className="ribbon-group"
+                role="group"
+                aria-label={t('ribbonMarkup')}
+                onMouseDown={(e) => e.preventDefault()}
+              >
                 <div className="ribbon-group-items">
                   <button
                     className="rb-big"
@@ -4567,7 +4596,11 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 2: Notes & Text */}
-              <div className="ribbon-group">
+              <div
+                className="ribbon-group"
+                role="group"
+                aria-label={`${t('drawNote')} / ${t('drawFreeText')}`}
+              >
                 <div className="ribbon-group-items">
                   {NOTE_TOOLS.map(({ tool, icon: NoteIcon, key }) => (
                     <button
@@ -4587,7 +4620,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 3: Shapes & Freehand */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('drawInk')}>
                 <div className="ribbon-group-items">
                   {SHAPE_TOOLS.map(({ tool, icon: DrawIcon, key }) => (
                     <button
@@ -4607,7 +4640,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 4: Style / Color */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('drawColor')}>
                 <div className="ribbon-group-items">
                   <div className="rb-drop-wrap">
                     <button
@@ -4656,7 +4689,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 5: Insert — signature, watermark, image */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonEditing')}>
                 <div className="ribbon-group-items">
                   <button
                     className={`rb-big${pendingSign ? ' active' : ''}`}
@@ -4695,7 +4728,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 6: Review — comments list */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('comments')}>
                 <div className="ribbon-group-items">
                   <button
                     className={`rb-big${sidebar === 'comments' ? ' active' : ''}`}
@@ -4715,7 +4748,7 @@ export default function App() {
           {ribbonTab === 'organize' && (
             <>
               {/* Group 1: Organize grid */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('tabOrganize')}>
                 <div className="ribbon-group-items">
                   <button className="rb-big" onClick={openOrganizeGrid} title={t('organizePages')}>
                     <span className="rb-big-icon">
@@ -4727,7 +4760,11 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 2: Orientation */}
-              <div className="ribbon-group">
+              <div
+                className="ribbon-group"
+                role="group"
+                aria-label={`${t('rotateLeft')} / ${t('rotateRight')}`}
+              >
                 <div className="ribbon-group-items">
                   <button
                     className="rb-big"
@@ -4755,7 +4792,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 3: Page Operations */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonPages')}>
                 <div className="ribbon-group-items">
                   <button
                     className="rb-big"
@@ -4816,7 +4853,11 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 4: Split & Merge */}
-              <div className="ribbon-group">
+              <div
+                className="ribbon-group"
+                role="group"
+                aria-label={`${t('splitPdf')} / ${t('combineFiles')}`}
+              >
                 <div className="ribbon-group-items">
                   <button
                     className="rb-big"
@@ -4847,7 +4888,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 5: Export Content */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonExport')}>
                 <div className="ribbon-group-items">
                   <button
                     className="rb-big"
@@ -4886,7 +4927,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 6: Document Security */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonDocument')}>
                 <div className="ribbon-group-items">
                   <button
                     className="rb-big"
@@ -4911,7 +4952,7 @@ export default function App() {
           {ribbonTab === 'view' && (
             <>
               {/* Group 1: Page Display */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('viewMode')}>
                 <div className="ribbon-group-items">
                   <button
                     className={`rb-big${viewMode === 'continuous' ? ' active' : ''}`}
@@ -4959,7 +5000,11 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 2: Zoom Modes */}
-              <div className="ribbon-group">
+              <div
+                className="ribbon-group"
+                role="group"
+                aria-label={`${t('fitWidth')} / ${t('fitPage')}`}
+              >
                 <div className="ribbon-group-items">
                   <button
                     className="rb-big"
@@ -5004,7 +5049,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 3: Zoom Adjust */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonZoom')}>
                 <div className="ribbon-group-items">
                   <button
                     className="rb-big"
@@ -5030,7 +5075,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 4: Navigation Panes */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonNavigation')}>
                 <div className="ribbon-group-items">
                   <button
                     className={`rb-big${sidebar === 'thumbs' ? ' active' : ''}`}
@@ -5068,7 +5113,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 5: Window & Info — fullscreen, properties, reload */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonDocument')}>
                 <div className="ribbon-group-items">
                   <button
                     className={`rb-big${isFullscreen ? ' active' : ''}`}
@@ -5108,7 +5153,11 @@ export default function App() {
           {ribbonTab === 'ai' && (
             <>
               {/* Group 1: Assistant Toggle */}
-              <div className="ribbon-group">
+              <div
+                className="ribbon-group ribbon-group--standalone"
+                role="group"
+                aria-label={t('ribbonAssistant')}
+              >
                 <div className="ribbon-group-items">
                   <button
                     className={`rb-big ai-entry${aiCollapsed ? '' : ' active'}`}
@@ -5124,7 +5173,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 2: Document Insights */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonDocument')}>
                 <div className="ribbon-group-items">
                   <button
                     className="rb-big"
@@ -5174,7 +5223,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 3: Current Page AI Actions */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonPages')}>
                 <div className="ribbon-group-items">
                   <button
                     className="rb-big"
@@ -5222,7 +5271,7 @@ export default function App() {
               </div>
               <div className="ribbon-sep" />
               {/* Group 4: Smart Structure & Translation */}
-              <div className="ribbon-group">
+              <div className="ribbon-group" role="group" aria-label={t('ribbonDocument')}>
                 <div className="ribbon-group-items">
                   <button
                     className="rb-big"

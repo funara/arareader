@@ -280,6 +280,26 @@ test('Read mode restores each PDF workspace and Command Center searches the docu
     await pdf.screenshot({ path: screenshotPath('command-center-rolling') })
     await hints.evaluate((track) => track.getAnimations()[0].play())
     await expect(modes.locator('button')).toHaveCount(4)
+    const modeChoices = modes.getByRole('group', { name: 'Modes' })
+    await expect(modeChoices.locator('button')).toHaveCount(3)
+    await expect(modeChoices.locator('.ribbon-modes-label')).toHaveText('Modes')
+    await expect(modeChoices.locator('.ai-entry')).toHaveCount(0)
+    await expect(pdf.locator('.ribbon-body')).toHaveCSS('height', '72px')
+    const modeGeometry = await modeChoices.evaluate((group) => {
+      const row = group.closest('.ribbon-body')!.getBoundingClientRect()
+      const caption = group.querySelector('.ribbon-modes-label')!.getBoundingClientRect()
+      const button = group.querySelector('button')!.getBoundingClientRect()
+      return {
+        captionTop: caption.top,
+        captionBottom: caption.bottom,
+        rowBottom: row.bottom,
+        buttonBottom: button.bottom,
+        buttonHeight: button.height,
+      }
+    })
+    expect(modeGeometry.captionTop).toBeGreaterThanOrEqual(modeGeometry.buttonBottom)
+    expect(modeGeometry.rowBottom - modeGeometry.captionBottom).toBeGreaterThanOrEqual(4)
+    expect(modeGeometry.buttonHeight).toBeGreaterThanOrEqual(48)
     await expect(modes.locator('button').first()).toHaveClass(/ai-entry/)
     await expect(modes.locator('button').nth(1)).toHaveAttribute('title', 'Select')
     await expect(modes.locator('button').nth(2)).toHaveAttribute('title', 'Edit PDF')
@@ -308,6 +328,7 @@ test('Read mode restores each PDF workspace and Command Center searches the docu
     await pdf.screenshot({ path: screenshotPath('command-center-narrow') })
     await modes.locator('button[title="Read mode"]').scrollIntoViewIfNeeded()
     await expect(modes.locator('button[title="Read mode"]')).toBeInViewport()
+    await expect(modeChoices.locator('.ribbon-modes-label')).toBeInViewport()
     await modes.locator('.ai-entry').scrollIntoViewIfNeeded()
     await expect(modes.locator('.ai-entry')).toBeInViewport()
     await pdf.setViewportSize(originalViewport)
@@ -316,6 +337,7 @@ test('Read mode restores each PDF workspace and Command Center searches the docu
       .filter({ hasText: /^View$/ })
       .click()
     await expect(modes.locator('button')).toHaveCount(3)
+    await expect(modeChoices.locator('.ribbon-modes-label')).toHaveText('Modes')
     await expect(modes.locator('button').nth(1)).toHaveText('Edit')
     await expect(modes.locator('button').nth(2)).toHaveText('Read')
     await pdf
@@ -1074,15 +1096,26 @@ for (const kind of ['strokes', 'image'] as const) {
       await expect(pdf.locator('.tb-save-pending')).toBeVisible()
       await pdf.keyboard.press(process.platform === 'darwin' ? 'Meta+s' : 'Control+s')
       await expect(pdf.locator('.tb-save-pending')).toHaveCount(0, { timeout: 20000 })
-      const screenshot = await pdf
-        .locator('.pdf-page')
-        .first()
-        .screenshot({ path: screenshotPath(`pdf-qr-primary-${kind}`) })
+      // Fit the entire saved page in the viewport so the footer cannot obscure
+      // the QR code in the screenshot when the ribbon height changes.
+      await pdf.setViewportSize({ width: 1280, height: 1800 })
+      const renderedPage = pdf.locator('.pdf-page').first()
+      await expect
+        .poll(async () => {
+          const bounds = await renderedPage.boundingBox()
+          const footer = await pdf.locator('.status-bar').boundingBox()
+          return bounds && footer ? bounds.y + bounds.height <= footer.y : false
+        })
+        .toBe(true)
+      const screenshot = await renderedPage.screenshot({
+        path: screenshotPath(`pdf-qr-primary-${kind}`),
+      })
       const rendered = await loadImage(screenshot)
-      const output = createCanvas(rendered.width, rendered.height)
+      const output = createCanvas(rendered.width * 2, rendered.height * 2)
       const outputCtx = output.getContext('2d')
-      outputCtx.drawImage(rendered, 0, 0)
-      const pixels = outputCtx.getImageData(0, 0, rendered.width, rendered.height)
+      outputCtx.imageSmoothingEnabled = false
+      outputCtx.drawImage(rendered, 0, 0, output.width, output.height)
+      const pixels = outputCtx.getImageData(0, 0, output.width, output.height)
       expect(jsQR(pixels.data, pixels.width, pixels.height)?.data).toContain('Signed by: Adhi\n')
     } finally {
       await closeReader(launched)

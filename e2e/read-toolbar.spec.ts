@@ -3,14 +3,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PDFDocument } from 'pdf-lib'
 import { expect, test } from '@playwright/test'
-import { closeReader, launchApp, waitForPageWithUrl } from './helpers'
+import { closeReader, launchApp, screenshotPath, waitForPageWithUrl } from './helpers'
 
 test('Read mode floating toolbar hides only when idle and keeps reading controls usable', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'arareader-read-toolbar-'))
   const path = join(dir, 'document.pdf')
-  const document = await PDFDocument.create()
-  for (let i = 0; i < 4; i++) document.addPage([612, 792])
-  await writeFile(path, await document.save())
+  const fixture = await PDFDocument.create()
+  for (let i = 0; i < 4; i++) fixture.addPage([612, 792])
+  await writeFile(path, await fixture.save())
   const launched = await launchApp({ openFile: path })
   try {
     const pdf = await waitForPageWithUrl(launched.app, 'pdf/out')
@@ -18,6 +18,40 @@ test('Read mode floating toolbar hides only when idle and keeps reading controls
     const toolbar = pdf.locator('.read-toolbar')
     const page = toolbar.locator('input')
     await expect(toolbar).toBeVisible()
+    const close = toolbar.getByRole('button', { name: 'Exit Read mode' })
+    await expect(close).toHaveAttribute('title', 'Exit Read mode')
+    await expect(close).toHaveText('')
+    await expect(close.locator('svg[aria-hidden="true"]')).toBeVisible()
+    await expect(close).toHaveCSS('width', '36px')
+    await expect(close).toHaveCSS('height', '36px')
+    await toolbar.screenshot({ path: screenshotPath('read-toolbar-close-light') })
+    const expectHoverColors = async () => {
+      await close.hover()
+      const colors = await close.evaluate((element) => {
+        const probe = document.createElement('span')
+        probe.style.color = 'var(--danger)'
+        probe.style.backgroundColor = 'var(--danger-bg)'
+        element.appendChild(probe)
+        const actual = getComputedStyle(element)
+        const expected = getComputedStyle(probe)
+        const result = {
+          hovered: element.matches(':hover'),
+          colorMatches: actual.color === expected.color,
+          backgroundMatches: actual.backgroundColor === expected.backgroundColor,
+        }
+        probe.remove()
+        return result
+      })
+      expect(colors).toEqual({ hovered: true, colorMatches: true, backgroundMatches: true })
+    }
+    await expectHoverColors()
+    await pdf.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'))
+    await expectHoverColors()
+    await pdf.screenshot({
+      path: screenshotPath('read-toolbar-close-dark-hover'),
+      clip: (await toolbar.boundingBox())!,
+    })
+    await pdf.evaluate(() => document.documentElement.setAttribute('data-theme', 'light'))
     await expect(launched.page.locator('.tab-view-switch, .tab-exit-read')).toHaveCount(0)
     await pdf.mouse.move(10, 100)
     await expect(toolbar).toHaveClass(/is-hidden/, { timeout: 5000 })
@@ -30,7 +64,8 @@ test('Read mode floating toolbar hides only when idle and keeps reading controls
 
     const viewport = await pdf.evaluate(() => ({ width: innerWidth, height: innerHeight }))
     await pdf.setViewportSize({ width: 360, height: 700 })
-    await expect(toolbar.getByRole('button', { name: 'Exit Read mode' })).toBeInViewport()
+    await expect(close).toBeInViewport()
+    await toolbar.screenshot({ path: screenshotPath('read-toolbar-close-narrow') })
     await pdf.setViewportSize(viewport)
     await toolbar.hover()
     await pdf.waitForTimeout(2800)
@@ -89,6 +124,12 @@ test('Read mode floating toolbar hides only when idle and keeps reading controls
     await pdf.keyboard.press('Escape')
     await expect(toolbar).toBeVisible()
     await pdf.keyboard.press('Escape')
+    await expect(toolbar).toHaveCount(0)
+    await expect(pdf.locator('.ribbon')).toBeVisible()
+    await pdf.locator('.ribbon-mode-group button[title="Read mode"]').click()
+    await close.focus()
+    await expect(close).toBeFocused()
+    await pdf.keyboard.press('Enter')
     await expect(toolbar).toHaveCount(0)
     await expect(pdf.locator('.ribbon')).toBeVisible()
   } finally {

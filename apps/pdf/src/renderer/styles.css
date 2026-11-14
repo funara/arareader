@@ -542,9 +542,9 @@ textarea {
 
 .ribbon-body {
   display: flex;
-  align-items: center;
-  padding: 4px 10px;
-  height: 56px;
+  align-items: flex-start;
+  padding: 5px 10px;
+  height: 72px;
   background: var(--surface);
   overflow-x: auto;
   overflow-y: hidden;
@@ -567,6 +567,33 @@ textarea {
   margin-left: -10px;
   background: var(--surface);
   border-right: 1px solid var(--border-subtle);
+  align-items: flex-start;
+}
+
+.ribbon-modes {
+  position: relative;
+  display: flex;
+  gap: 2px;
+}
+
+.ribbon-modes-label,
+.ribbon-group[role='group']:not(.ribbon-group--standalone)::after {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 12px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.ribbon-group[role='group']:not(.ribbon-group--standalone)::after {
+  content: attr(aria-label);
 }
 
 @media (max-width: 420px) {
@@ -576,11 +603,16 @@ textarea {
 }
 
 .ribbon-group {
+  position: relative;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: 1px 0;
+  padding: 0;
   flex-shrink: 0;
+}
+
+.ribbon-group--standalone .rb-big {
+  height: 62px;
 }
 
 .ribbon-group-items {
@@ -591,6 +623,7 @@ textarea {
 }
 
 .ribbon-sep {
+  align-self: center;
   width: 1px;
   height: 24px;
   flex-shrink: 0;
@@ -3419,8 +3452,14 @@ textarea {
   white-space: nowrap;
 }
 .read-toolbar .read-toolbar-exit {
-  background: var(--surface-subtle);
-  border: 1px solid var(--border-strong);
+  display: grid;
+  place-items: center;
+  width: 36px;
+  padding: 0;
+}
+.read-toolbar .read-toolbar-exit:hover {
+  color: var(--danger);
+  background: var(--danger-bg);
 }
 .read-toolbar-popup-anchor {
   position: relative;

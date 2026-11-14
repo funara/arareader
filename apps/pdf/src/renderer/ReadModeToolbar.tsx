@@ -237,8 +237,25 @@ export function ReadModeToolbar({
           </div>
         )}
       </div>
-      <button type="button" className="read-toolbar-exit" onClick={onExit}>
-        {t('exitReadMode')}
+      <button
+        type="button"
+        className="read-toolbar-exit"
+        title={t('exitReadMode')}
+        aria-label={t('exitReadMode')}
+        onClick={onExit}
+      >
+        <svg
+          aria-hidden="true"
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+        >
+          <path d="M6 6l12 12M18 6L6 18" />
+        </svg>
       </button>
     </div>
   )
