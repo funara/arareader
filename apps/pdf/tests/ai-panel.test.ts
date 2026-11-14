@@ -460,6 +460,85 @@ describe('AiPanel orchestration (mocked provider + mocked history)', () => {
     await flush()
   }
 
+  it('uses extracted text, not the internal page marker, when AI recommendations cannot be parsed', async () => {
+    const harness = makeHarness()
+    harness.api.getPreferences.mockResolvedValue({
+      aiAutoSuggestions: true,
+      aiAutoSuggestionsConsentVersion: 1,
+    })
+    vi.spyOn(harness.deps, 'doc').mockReturnValue({
+      numPages: 1,
+      getPage: async () => ({
+        getTextContent: async () => ({
+          items: [{ str: 'A useful document heading', hasEOL: false }],
+        }),
+        cleanup: () => {},
+      }),
+    } as never)
+    await mount(harness)
+    expect(harness.api.aiChat).toHaveBeenCalledOnce()
+    expect(container.textContent).not.toContain('Explore "--- Page 1 ---"')
+    expect(container.textContent).toContain('Explore "A useful document heading"')
+  })
+
+  it.each(['', '   ', '--- Page 1 ---'])(
+    'keeps generic suggestions when extracted text is not document content: %j',
+    async (text) => {
+      const harness = makeHarness()
+      harness.api.getPreferences.mockResolvedValue({
+        aiAutoSuggestions: true,
+        aiAutoSuggestionsConsentVersion: 1,
+      })
+      vi.spyOn(harness.deps, 'doc').mockReturnValue({
+        numPages: 1,
+        getPage: async () => ({
+          getTextContent: async () => ({ items: [{ str: text, hasEOL: false }] }),
+          cleanup: () => {},
+        }),
+      } as never)
+      await mount(harness)
+      expect(harness.api.aiChat).not.toHaveBeenCalled()
+      expect(container.textContent).not.toContain('Tailored to this document')
+      expect(container.textContent).not.toContain('Explore "--- Page 1 ---"')
+    },
+  )
+
+  it('uses a document outline when page text is empty and the provider response is malformed', async () => {
+    const harness = makeHarness()
+    harness.api.getPreferences.mockResolvedValue({
+      aiAutoSuggestions: true,
+      aiAutoSuggestionsConsentVersion: 1,
+    })
+    vi.spyOn(harness.deps, 'outline').mockReturnValue([{ title: 'Executive summary' }] as never)
+    vi.spyOn(harness.deps, 'doc').mockReturnValue({
+      numPages: 1,
+      getPage: async () => ({
+        getTextContent: async () => ({ items: [] }),
+        cleanup: () => {},
+      }),
+    } as never)
+    await mount(harness)
+    expect(harness.api.aiChat).toHaveBeenCalledOnce()
+    expect(container.textContent).toContain('Explore "Executive summary"')
+  })
+
+  it('keeps generic suggestions when extracting context fails', async () => {
+    const harness = makeHarness()
+    harness.api.getPreferences.mockResolvedValue({
+      aiAutoSuggestions: true,
+      aiAutoSuggestionsConsentVersion: 1,
+    })
+    vi.spyOn(harness.deps, 'doc').mockReturnValue({
+      numPages: 1,
+      getPage: async () => {
+        throw new Error('Page unavailable')
+      },
+    } as never)
+    await mount(harness)
+    expect(harness.api.aiChat).not.toHaveBeenCalled()
+    expect(container.textContent).not.toContain('Tailored to this document')
+  })
+
   it('waits for a recent-chat boundary before scanning, then scans again after New chat', async () => {
     const harness = makeHarness({
       history: [message({ seq: 0, role: 'user', text: 'previous question' })],

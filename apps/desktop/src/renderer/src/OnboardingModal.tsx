@@ -89,7 +89,7 @@ export function OnboardingModal({
   const [customKey, setCustomKey] = useState('')
   const [customModel, setCustomModel] = useState(DEFAULT_CUSTOM_MODEL)
   const [showKey, setShowKey] = useState(false)
-  const [aiAutoSuggestions, setAiAutoSuggestions] = useState(false)
+  const [aiAutoSuggestions, setAiAutoSuggestions] = useState(true)
   const aiAutoSuggestionsTouchedRef = useRef(false)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -121,9 +121,11 @@ export function OnboardingModal({
       .getPreferences()
       .then((prefs) => {
         if (!active || aiAutoSuggestionsTouchedRef.current) return
-        if (prefs.aiAutoSuggestionsConsentVersion === 1) {
-          setAiAutoSuggestions(prefs.aiAutoSuggestions === true)
-        }
+        setAiAutoSuggestions(
+          prefs.aiAutoSuggestionsConsentVersion === 1
+            ? prefs.aiAutoSuggestions === true
+            : !prefs.onboardingCompleted,
+        )
       })
       .catch(() => {})
     return () => {
@@ -204,7 +206,7 @@ export function OnboardingModal({
           ? aiAutoSuggestions
           : prefs.aiAutoSuggestionsConsentVersion === 1
             ? prefs.aiAutoSuggestions === true
-            : aiAutoSuggestions
+            : !prefs.onboardingCompleted
         await window.reader.setPreferences({
           ...prefs,
           aiAutoSuggestions: aiChoice,
@@ -265,8 +267,8 @@ export function OnboardingModal({
             <>
               <h3 className="onboard-title">Configure your AI Copilot (Optional)</h3>
               <p className="onboard-subtitle">
-                Connect an AI provider for document analysis and chat. Requests you choose to send
-                go directly to that provider; ARAReader has no telemetry or relay service.
+                Connect an AI provider for document analysis and chat. Requests go directly to that
+                provider; ARAReader has no telemetry or relay service.
               </p>
             </>
           )}
@@ -535,10 +537,10 @@ export function OnboardingModal({
                   <span>Allow automatic AI recommendations when opening PDFs</span>
                 </label>
                 <p id="onboard-ai-sharing-details" className="onboard-hint">
-                  Off by default. If enabled, opening a PDF while AI is connected sends its
-                  filename, page count, up to 10 outline titles, and up to 1,200 characters from the
-                  first 3 pages to your configured provider. This is separate from chat you start
-                  yourself.
+                  On by default for new setups. If enabled, opening a PDF while AI is connected
+                  sends its filename, page count, up to 10 outline titles, and up to 1,200
+                  characters from the first 3 pages to your configured provider. Turn this off to
+                  prevent automatic sharing. This is separate from chat you start yourself.
                 </p>
               </div>
 

@@ -266,7 +266,7 @@ async function writePreferences(
       current && typeof current === 'object' && !Array.isArray(current)
         ? (current as Record<string, unknown>)
         : {}
-    // Only a deliberate checkbox action may change consent; stale snapshots preserve the stored choice.
+    // Only a trusted settings or setup action may change consent; stale snapshots preserve the stored choice.
     const hasExplicitConsentAction =
       acceptConsentAction &&
       incoming.aiAutoSuggestionsConsentAction === true &&

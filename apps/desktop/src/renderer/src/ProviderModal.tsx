@@ -1599,10 +1599,10 @@ export function ProviderModal({
                       Adaptive AI recommendations on document open
                     </div>
                     <div className="settings-toggle-desc">
-                      Off by default. When enabled, opening a PDF while AI is connected sends its
-                      filename, page count, up to 10 outline titles, and up to 1,200 characters from
-                      the first 3 pages to your configured AI provider for tailored prompts. This is
-                      separate from chat messages you choose to send.
+                      When enabled, opening a PDF while AI is connected sends its filename, page
+                      count, up to 10 outline titles, and up to 1,200 characters from the first 3
+                      pages to your configured AI provider for tailored prompts. This is separate
+                      from chat messages you choose to send.
                     </div>
                   </div>
                   <input

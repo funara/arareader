@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test, expect } from '@playwright/test'
@@ -19,10 +19,9 @@ test.describe('onboarding AI setup recovery', () => {
       const consent = onboarding.getByRole('checkbox', {
         name: 'Allow automatic AI recommendations when opening PDFs',
       })
-      await expect(consent).not.toBeChecked()
+      await expect(consent).toBeChecked()
       await expect(onboarding).toContainText('up to 1,200 characters')
       await expect(onboarding).toContainText('configured provider')
-      await consent.check()
       await page.locator('#onboard-google-key').fill('e2e-only-dummy-key')
       await page.getByRole('button', { name: 'Get Started' }).click()
 
@@ -37,6 +36,59 @@ test.describe('onboarding AI setup recovery', () => {
       expect(preferences.aiAutoSuggestions).toBe(true)
       expect(preferences.aiAutoSuggestionsConsentVersion).toBe(1)
       expect(preferences.aiAutoSuggestionsConsentAction).toBeUndefined()
+    } finally {
+      await closeReader(launched)
+    }
+  })
+
+  test('a new user can turn automatic recommendations off during setup', async () => {
+    const userDataDir = await mkdtemp(join(tmpdir(), 'arareader-onboarding-optout-'))
+    const launched = await launchApp({ testOnboarding: true, userDataDir })
+    try {
+      const page = launched.page
+      await page.locator('#onboard-display-name').fill('ARA')
+      await page.getByRole('button', { name: /Next/ }).click()
+      const consent = page.getByRole('checkbox', {
+        name: 'Allow automatic AI recommendations when opening PDFs',
+      })
+      await expect(consent).toBeChecked()
+      await consent.uncheck()
+      await page.getByRole('button', { name: 'Get Started' }).click()
+      await expect(page.locator('.onboard-modal')).toHaveCount(0)
+      const preferences = await page.evaluate(() => window.reader.getPreferences())
+      expect(preferences.aiAutoSuggestions).toBe(false)
+      expect(preferences.aiAutoSuggestionsConsentVersion).toBe(1)
+    } finally {
+      await closeReader(launched)
+    }
+  })
+
+  test('onboarding preserves an existing explicit opt-out', async () => {
+    const userDataDir = await mkdtemp(join(tmpdir(), 'arareader-onboarding-saved-optout-'))
+    await writeFile(
+      join(userDataDir, 'app-settings.json'),
+      JSON.stringify({
+        userPreferences: {
+          aiAutoSuggestions: false,
+          aiAutoSuggestionsConsentVersion: 1,
+          onboardingCompleted: false,
+        },
+      }),
+    )
+    const launched = await launchApp({ testOnboarding: true, userDataDir })
+    try {
+      const page = launched.page
+      await page.locator('#onboard-display-name').fill('ARA')
+      await page.getByRole('button', { name: /Next/ }).click()
+      const consent = page.getByRole('checkbox', {
+        name: 'Allow automatic AI recommendations when opening PDFs',
+      })
+      await expect(consent).not.toBeChecked()
+      await page.getByRole('button', { name: 'Get Started' }).click()
+      await expect(page.locator('.onboard-modal')).toHaveCount(0)
+      const preferences = await page.evaluate(() => window.reader.getPreferences())
+      expect(preferences.aiAutoSuggestions).toBe(false)
+      expect(preferences.aiAutoSuggestionsConsentVersion).toBe(1)
     } finally {
       await closeReader(launched)
     }

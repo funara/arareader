@@ -182,6 +182,10 @@ export function parseAiSuggestions(raw: string): DynamicSuggestion[] | null {
   return null
 }
 
+function isContextText(line: string): boolean {
+  return Boolean(line.trim()) && !/^---\s*Page\s+\d+\s*---$/i.test(line.trim())
+}
+
 /** Build a fallback context-aware first suggestion from the gathered document context */
 export function buildContextualFirstSuggestion(
   fileName: string,
@@ -198,7 +202,7 @@ export function buildContextualFirstSuggestion(
     excerpt
       .split('\n')
       .map((l) => l.trim())
-      .find((l) => l.length >= 4 && l.length <= 64) ||
+      .find((l) => l.length >= 4 && l.length <= 64 && isContextText(l)) ||
     cleanFile ||
     'this document'
   const shortTopic = firstHeading.length > 32 ? `${firstHeading.slice(0, 30)}…` : firstHeading
@@ -1722,7 +1726,7 @@ export function AiPanel({
         const outlineNodes = apiRef.current.outline() ?? []
         const outlineTitles = outlineNodes
           .map((n) => n.title?.trim())
-          .filter((t): t is string => Boolean(t))
+          .filter((t): t is string => Boolean(t) && isContextText(t))
           .slice(0, 10)
 
         // Gather text from the first up to 3 pages (up to 1200 chars total) so sparse cover pages don't fail
@@ -1750,6 +1754,7 @@ export function AiPanel({
 
         if (canceled || abortCtrl.signal.aborted || userCanceledScanRef.current) return
         const excerpt = gatheredText.slice(0, 1200).trim()
+        if (outlineTitles.length === 0 && !excerpt.split('\n').some(isContextText)) return
         const fallbackFirst = buildContextualFirstSuggestion(
           docName,
           doc.numPages,

@@ -9,10 +9,9 @@ import { test, expect } from '@playwright/test'
 import { closeReader, launchApp, waitForPageWithUrl } from './helpers'
 
 /**
- * R8: the "adaptive AI recommendations" scan is on by default and sends the
- * document name, outline and an excerpt of the first pages to the configured
- * provider when a PDF opens. These two tests prove what the app actually sends
- * and that switching the preference off prevents the request entirely.
+ * The adaptive recommendations scan sends the document name, outline and an
+ * excerpt of the first pages to the configured provider when enabled. These
+ * tests prove what the app sends and that turning it off prevents the request.
  *
  * A loopback OpenAI-compatible server stands in for the provider: no paid call,
  * no external network, and the request body is inspectable as evidence.
