@@ -127,6 +127,7 @@ const DOC_OPTS = {
   cMapPacked: true,
   standardFontDataUrl: `${ASSET_BASE}standard_fonts/`,
   wasmUrl: `${ASSET_BASE}wasm/`,
+  fontExtraProperties: true,
 }
 
 /** Single page: renders canvas + text layer (select/copy) when visible, released once off-viewport */

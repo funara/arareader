@@ -8,7 +8,7 @@ import {
 } from '@arareader/agent-core'
 import type { OutlineNode } from '../OutlinePanel'
 import type { PageGeom } from '../annotations'
-import { buildTextEdit, extractPageTextBlocks } from '../content-edit'
+import { buildTextEdit, enrichTextStyles, extractPageTextBlocks } from '../content-edit'
 import type { PageContentEdit } from '../content-edit'
 import type { SearchIndex } from '../search'
 import { searchInIndex } from '../search'
@@ -651,7 +651,11 @@ async function editTextBlock(
   const geom = deps.pageGeom(r.origIdx)
   const pdfPage = await doc.getPage(r.origIdx + 1)
   const content = await pdfPage.getTextContent()
-  const blocks = extractPageTextBlocks(r.origIdx, content.items, content.styles)
+  const blocks = extractPageTextBlocks(
+    r.origIdx,
+    content.items,
+    enrichTextStyles(pdfPage.commonObjs, content.styles),
+  )
   // Matching a substring of the line is what the model can reliably quote from read_pages
   const needle = find.toLowerCase()
   const block = blocks.find((b) => b.text.toLowerCase().includes(needle))

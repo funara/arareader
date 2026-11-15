@@ -7,9 +7,12 @@ import {
   compileContentEdits,
   cropCanvasImage,
   displayBoxToPdf,
+  enrichTextStyles,
+  enrichTextStylesAsync,
   extractPageImages,
   extractPageTextBlocks,
   imageFileToPng,
+  parsePdfFontName,
   renderSolidPatch,
   sampleCanvasColors,
   type EditableTextBlock,
@@ -246,6 +249,166 @@ describe('extractPageTextBlocks', () => {
     expect(blocks.map((b) => b.id)).toEqual(['t2-0', 't2-1', 't2-2', 't2-3'])
   })
 
+  it('recovers bold, italic, and font family from pdf.js commonObjs via enrichTextStyles', () => {
+    const rawStyles = {
+      g_d0_f1: { fontFamily: 'sans-serif' },
+      g_d0_f2: { fontFamily: 'serif' },
+      g_d0_f3: { fontFamily: 'monospace' },
+    }
+    const commonObjs = {
+      has: (id: string) => id === 'g_d0_f1' || id === 'g_d0_f2' || id === 'g_d0_f3',
+      get: (id: string) =>
+        ({
+          g_d0_f1: {
+            bold: true,
+            italic: false,
+            fallbackName: 'sans-serif',
+            loadedName: 'Helvetica',
+          },
+          g_d0_f2: { black: true, italic: true, fallbackName: 'serif', loadedName: 'Times' },
+          g_d0_f3: { bold: false, italic: false, fallbackName: 'monospace', loadedName: 'Courier' },
+        })[id],
+    }
+    const enriched = enrichTextStyles(commonObjs, rawStyles)
+    const blocks = extractPageTextBlocks(
+      0,
+      [
+        item('The Midterm Case Study', 72, 700, { width: 120, size: 33, fontName: 'g_d0_f1' }),
+        item('Serif Heading', 72, 650, { width: 80, size: 18, fontName: 'g_d0_f2' }),
+        item('const x = 1', 72, 600, { width: 70, size: 12, fontName: 'g_d0_f3' }),
+      ],
+      enriched,
+    )
+    expect(blocks.map((b) => [b.bold, b.italic, b.fontFamily])).toEqual([
+      [true, false, undefined],
+      [true, true, 'serif'],
+      [false, false, 'mono'],
+    ])
+  })
+
+  it('recovers a non-embedded font family from systemFontInfo.baseFontName', () => {
+    const commonObjs = {
+      has: (id: string) => id === 'g_d0_f1',
+      get: () => ({
+        loadedName: 'g_d0_f1',
+        systemFontInfo: {
+          baseFontName: 'Aptos-Bold',
+          css: '"Aptos",sans-serif',
+          loadedName: 'g_d0_f1',
+        },
+      }),
+    }
+    const enriched = enrichTextStyles(commonObjs, { g_d0_f1: { fontFamily: 'sans-serif' } })
+    expect(enriched?.g_d0_f1?.fontName).toBe('Aptos')
+    expect(enriched?.g_d0_f1?.bold).toBe(true)
+
+    const [block] = extractPageTextBlocks(
+      0,
+      [item('Heading', 72, 700, { fontName: 'g_d0_f1' })],
+      enriched,
+    )
+    expect(block?.fontName).toBe('Aptos')
+    expect(block?.bold).toBe(true)
+  })
+
+  it('parses real PDF font family names and binds embedded FontFace weights consistently', async () => {
+    expect(parsePdfFontName('ABCDEF+Inter-Bold')).toBe('Inter')
+    expect(parsePdfFontName('XYZABC+TimesNewRomanPS-BoldItalicMT')).toBe('Times New Roman')
+    expect(parsePdfFontName('Calibri-Bold')).toBe('Calibri')
+    expect(parsePdfFontName('SegoeUI-Semibold')).toBe('Segoe UI')
+    expect(parsePdfFontName('Helvetica-Bold')).toBeUndefined()
+    expect(parsePdfFontName('g_d0_f1')).toBeUndefined()
+
+    const clearData = vi.fn()
+    const addedFaces: Array<{ family: string; descriptors: FontFaceDescriptors }> = []
+    const origFontFace = globalThis.FontFace
+    const origFonts = Object.getOwnPropertyDescriptor(document, 'fonts')
+    class FakeFontFace {
+      family: string
+      descriptors: FontFaceDescriptors
+      constructor(family: string, _source: unknown, descriptors: FontFaceDescriptors = {}) {
+        this.family = family
+        this.descriptors = descriptors
+      }
+      load = vi.fn(async () => this)
+    }
+    ;(globalThis as { FontFace: unknown }).FontFace = FakeFontFace
+    Object.defineProperty(document, 'fonts', {
+      configurable: true,
+      value: {
+        add: (face: FakeFontFace) => {
+          addedFaces.push({ family: face.family, descriptors: face.descriptors })
+        },
+      },
+    })
+
+    try {
+      const commonObjs = {
+        has: (id: string) => id === 'g_d0_f1',
+        get: () => ({
+          name: 'ABCDEF+Inter-SemiBold',
+          bold: false,
+          italic: false,
+          isSerifFont: false,
+          isMonospace: false,
+          loadedName: 'g_d0_f1',
+          fallbackName: 'sans-serif',
+          data: new Uint8Array([1, 2, 3]),
+          clearData,
+        }),
+      }
+      const enriched = await enrichTextStylesAsync(commonObjs, {
+        g_d0_f1: { fontFamily: 'sans-serif' },
+      })
+      const blocks = extractPageTextBlocks(
+        0,
+        [item('The Midterm Case Study', 72, 700, { width: 120, size: 33, fontName: 'g_d0_f1' })],
+        enriched,
+      )
+      expect(blocks[0]!.bold).toBe(true)
+      expect(blocks[0]!.fontName).toBe('Inter')
+      expect(blocks[0]!.embeddedFont).toBe('ara-pdf-g_d0_f1')
+      expect(addedFaces).toEqual([
+        { family: 'ara-pdf-g_d0_f1', descriptors: { weight: '700', style: 'normal' } },
+      ])
+      expect(clearData).toHaveBeenCalledTimes(1)
+
+      // Symbolic-flagged CID subset fonts (Chromium/Figma/Canva) must still bind their FontFace
+      let symbolicData: Uint8Array | undefined = new Uint8Array([4, 5, 6])
+      const symbolicFontObj = {
+        name: 'ABCDEF+SpaceGrotesk-Bold',
+        bold: false,
+        italic: false,
+        isSymbolicFont: true,
+        isSerifFont: false,
+        isMonospace: false,
+        loadedName: 'g_d0_f2',
+        fallbackName: 'sans-serif',
+        get data() {
+          return symbolicData
+        },
+        clearData: () => {
+          symbolicData = undefined
+        },
+      }
+      const symbolicObjs = {
+        has: (id: string) => id === 'g_d0_f2',
+        get: () => symbolicFontObj,
+      }
+      const [run1, run2] = await Promise.all([
+        enrichTextStylesAsync(symbolicObjs, { g_d0_f2: { fontFamily: 'sans-serif' } }),
+        enrichTextStylesAsync(symbolicObjs, { g_d0_f2: { fontFamily: 'sans-serif' } }),
+      ])
+      expect(run1?.g_d0_f2?.embeddedFont).toBe('ara-pdf-g_d0_f2')
+      expect(run2?.g_d0_f2?.embeddedFont).toBe('ara-pdf-g_d0_f2')
+      expect(addedFaces).toHaveLength(2)
+    } finally {
+      ;(globalThis as { FontFace: unknown }).FontFace = origFontFace
+      if (origFonts) Object.defineProperty(document, 'fonts', origFonts)
+      else Reflect.deleteProperty(document, 'fonts')
+    }
+  })
+
   it('derives the font size from the transform and falls back to the item height', () => {
     const blocks = extractPageTextBlocks(0, [
       // 10pt glyphs rotated 90°: hypot(c, d) is still the effective size
@@ -408,10 +571,23 @@ describe('sampleCanvasColors', () => {
     })
   })
 
-  it('averages the four border samples and stays lowercase hex', () => {
+  it('uses the median border sample and stays lowercase hex', () => {
     const canvas = fakeCanvas(10, 10)
-    paintPixel(canvas, 4, 3, [255, 0, 0]) // left border sample sits at (x1-1, midY)
+    paintPixel(canvas, 4, 3, [255, 0, 0])
     expect(sampleCanvasColors(canvas, box(5, 4, 4, 4)).bgColor).toMatch(/^#[0-9a-f]{6}$/)
+  })
+
+  it('ignores adjacent-line ink touching the top edge so tight headings stay white (#ffffff)', () => {
+    const canvas = fakeCanvas(40, 40)
+    paintPixel(canvas, 20, 20, [0, 0, 0])
+    // Paint solid black ink across the entire row just above the box (y = 14 for top = 15)
+    for (let x = 5; x < 35; x++) {
+      paintPixel(canvas, x, 14, [0, 0, 0])
+    }
+    expect(sampleCanvasColors(canvas, box(10, 15, 20, 12))).toEqual({
+      bgColor: '#ffffff',
+      color: '#000000',
+    })
   })
 })
 

@@ -2,7 +2,12 @@ import { OPS } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import type { DrawingInput, StampInput } from '../shared/ipc'
 import type { PageGeom } from './annotations'
 import { pdfRectToCss, viewToPdf } from './annotations'
-import { renderTextBox } from './stamps'
+import { renderTextBox, type TextFontFamily } from './stamps'
+
+export type { TextFontFamily }
+
+/** `original` keeps the detected PDF face; a generic family replaces it */
+export type TextFontChoice = TextFontFamily | 'original'
 
 /**
  * Direct text/image editing, the non-destructive way: discovery reads what pdf.js already
@@ -29,6 +34,262 @@ export interface RawTextItem {
 }
 export interface TextStyle {
   fontFamily?: string
+  bold?: boolean
+  italic?: boolean
+  fontName?: string
+  embeddedFont?: string
+  isSerif?: boolean
+  isMono?: boolean
+}
+
+export interface PageCommonObjsLike<T = unknown> {
+  has(name: string): boolean
+  get(name: string): T
+}
+
+interface PdfJsFontLike {
+  name?: string
+  bold?: boolean
+  black?: boolean
+  italic?: boolean
+  isSerifFont?: boolean
+  isMonospace?: boolean
+  isType3Font?: boolean
+  isSymbolicFont?: boolean
+  missingFile?: boolean
+  fallbackName?: string
+  loadedName?: string
+  data?: Uint8Array
+  clearData?: () => void
+  cssFontInfo?: {
+    fontFamily?: string
+    fontWeight?: string | number
+    italicAngle?: string | number
+  } | null
+  systemFontInfo?: { css?: string; loadedName?: string; baseFontName?: string } | null
+}
+
+const KNOWN_FONT_NAMES: Record<string, string> = {
+  timesnewroman: 'Times New Roman',
+  timesnewromanps: 'Times New Roman',
+  timesroman: 'Times New Roman',
+  couriernew: 'Courier New',
+  couriernewps: 'Courier New',
+  helveticaneue: 'Helvetica Neue',
+  segoeui: 'Segoe UI',
+  microsoftyahei: 'Microsoft YaHei',
+  pingfangsc: 'PingFang SC',
+  opensans: 'Open Sans',
+  notosans: 'Noto Sans',
+  notoserif: 'Noto Serif',
+  sourcesanspro: 'Source Sans Pro',
+  sourcesans3: 'Source Sans 3',
+  sourceserifpro: 'Source Serif Pro',
+  plusjakartasans: 'Plus Jakarta Sans',
+  dmsans: 'DM Sans',
+  jetbrainsmono: 'JetBrains Mono',
+  firacode: 'Fira Code',
+  firasans: 'Fira Sans',
+}
+
+const GENERIC_OR_STD_FONT =
+  /^(?:(?:sans-serif|serif|monospace|helvetica|times|courier)$|g_d\d+_[fs]\d+|invalidpdfjsfont)/i
+
+/**
+ * Extract a clean OS-matchable font family name from a PDF font name (e.g.
+ * `"ABCDEF+Inter-Bold"` → `"Inter"`, `"TimesNewRomanPS-BoldMT"` → `"Times New Roman"`).
+ * Returns `undefined` for generic CSS families, internal pdf.js IDs, and standard PDF aliases
+ * that are better served by the cross-platform fallback stack.
+ */
+export function parsePdfFontName(rawName: string | undefined): string | undefined {
+  if (!rawName) return undefined
+  let name = rawName.trim()
+  if (!name || GENERIC_OR_STD_FONT.test(name)) return undefined
+  // Strip 6-letter PDF subset prefix (e.g. ABCDEF+Inter-Bold)
+  name = name.replace(/^[A-Z]{6}\+/, '')
+  // Drop style/encoding tags after comma or hyphen/underscore
+  name = name.replace(/[,_].*$/, '')
+  name = name.replace(
+    /-(?:Regular|Normal|Roman|Book|Light|ExtraLight|UltraLight|Thin|Medium|SemiBold|Semibold|DemiBold|Demibold|Bold|ExtraBold|UltraBold|Black|Heavy|Italic|Oblique|BoldItalic|BoldOblique|SemiboldItalic|Condensed|Narrow|Expanded|PSMT|MT|PS).*$/i,
+    '',
+  )
+  name = name.replace(/(?:BoldItalic|BoldOblique|Bold|Italic|Oblique)?(?:PSMT|MT|PS)$/i, '')
+  name = name.trim()
+  if (!name || GENERIC_OR_STD_FONT.test(name)) return undefined
+
+  const compact = name.replace(/[\s_-]+/g, '').toLowerCase()
+  if (KNOWN_FONT_NAMES[compact]) return KNOWN_FONT_NAMES[compact]
+  if (GENERIC_OR_STD_FONT.test(compact)) return undefined
+
+  // Split CamelCase (e.g. "DMSans" -> "DM Sans", "FiraCode" -> "Fira Code")
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .trim()
+}
+
+const embeddedFontCache = new WeakMap<object, Map<string, Promise<string | undefined>>>()
+const STANDARD_LOADED_NAMES = new Set([
+  'Helvetica',
+  'Times',
+  'Courier',
+  'sans-serif',
+  'serif',
+  'monospace',
+])
+
+function ensureEmbeddedFontFace(
+  fontObj: PdfJsFontLike,
+  bold: boolean,
+  italic: boolean,
+): Promise<string | undefined> {
+  const variantKey = `${bold ? '700' : '400'}:${italic ? 'italic' : 'normal'}`
+  let byVariant = embeddedFontCache.get(fontObj)
+  const cached = byVariant?.get(variantKey)
+  if (cached) return cached
+
+  const loadedName = fontObj.loadedName?.trim()
+  if (!loadedName || STANDARD_LOADED_NAMES.has(loadedName)) return Promise.resolve(undefined)
+  // Allow symbolic-flagged subset fonts (Chromium/Figma/Canva CID fonts set Symbolic even for Latin text)
+  if (fontObj.isType3Font || fontObj.missingFile) return Promise.resolve(undefined)
+  if (typeof FontFace === 'undefined' || typeof document === 'undefined' || !document.fonts) {
+    return Promise.resolve(undefined)
+  }
+  if (!byVariant) {
+    byVariant = new Map()
+    embeddedFontCache.set(fontObj, byVariant)
+  }
+
+  // If upright normal weight, pdf.js already bound `loadedName` with { weight: 'normal', style: 'normal' }
+  if (!bold && !italic) {
+    fontObj.clearData?.()
+    const resolved = Promise.resolve(loadedName)
+    byVariant.set(variantKey, resolved)
+    return resolved
+  }
+  if (!fontObj.data || fontObj.data.byteLength === 0) return Promise.resolve(undefined)
+
+  // Register a weight/style-tagged alias so Chromium does not faux-bold an already-bold embedded face
+  const alias = `ara-pdf-${loadedName}`
+  const bytes = new Uint8Array(fontObj.data)
+  const pending = (async () => {
+    try {
+      const face = new FontFace(alias, bytes, {
+        weight: bold ? '700' : '400',
+        style: italic ? 'italic' : 'normal',
+      })
+      document.fonts.add(face)
+      await face.load()
+      return alias
+    } catch {
+      return undefined
+    } finally {
+      fontObj.clearData?.()
+    }
+  })()
+  byVariant.set(variantKey, pending)
+  return pending
+}
+
+function buildEnrichedStyle(style: TextStyle, fontObj: PdfJsFontLike | null): TextStyle {
+  const cssWeight = Number(fontObj?.cssFontInfo?.fontWeight)
+  const italicAngle = Number(fontObj?.cssFontInfo?.italicAngle)
+  const rawName =
+    fontObj?.name ??
+    fontObj?.cssFontInfo?.fontFamily ??
+    fontObj?.systemFontInfo?.baseFontName ??
+    style.fontFamily
+  const bold =
+    Boolean(style.bold) ||
+    Boolean(fontObj?.bold || fontObj?.black) ||
+    (Number.isFinite(cssWeight) && cssWeight >= 600) ||
+    /bold|black|heavy|semibold|demibold|demi|extrabold|ultrabold/i.test(rawName ?? '')
+  const italic =
+    Boolean(style.italic) ||
+    Boolean(fontObj?.italic) ||
+    (Number.isFinite(italicAngle) && italicAngle !== 0) ||
+    /italic|oblique/i.test(rawName ?? '')
+  const familyParts = [
+    style.fontFamily,
+    fontObj?.name,
+    fontObj?.cssFontInfo?.fontFamily,
+    fontObj?.systemFontInfo?.baseFontName,
+    fontObj?.systemFontInfo?.css,
+    fontObj?.loadedName,
+    fontObj?.fallbackName,
+  ].filter((v): v is string => typeof v === 'string' && v.trim() !== '')
+  const fontName =
+    style.fontName ??
+    parsePdfFontName(fontObj?.name) ??
+    parsePdfFontName(fontObj?.cssFontInfo?.fontFamily) ??
+    parsePdfFontName(fontObj?.systemFontInfo?.baseFontName) ??
+    parsePdfFontName(style.fontFamily)
+  const isSerif = Boolean(style.isSerif || fontObj?.isSerifFont)
+  const isMono = Boolean(style.isMono || fontObj?.isMonospace)
+  const embeddedFont = style.embeddedFont
+  return {
+    fontFamily: familyParts.join(' ') || style.fontFamily,
+    bold,
+    italic,
+    ...(fontName ? { fontName } : {}),
+    ...(embeddedFont ? { embeddedFont } : {}),
+    ...(isSerif ? { isSerif } : {}),
+    ...(isMono ? { isMono } : {}),
+  }
+}
+
+function readFontObj(commonObjs: PageCommonObjsLike, key: string): PdfJsFontLike | null {
+  if (!commonObjs.has(key)) return null
+  try {
+    const raw = commonObjs.get(key)
+    return raw && typeof raw === 'object' ? (raw as PdfJsFontLike) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Enrich pdf.js `getTextContent().styles` with font flags (`bold`, `italic`, `fontName`,
+ * `isSerif`, `isMono`) from `page.commonObjs` populated by `getOperatorList()` / `render()`.
+ */
+export function enrichTextStyles(
+  commonObjs: PageCommonObjsLike | null | undefined,
+  styles?: Record<string, TextStyle>,
+): Record<string, TextStyle> | undefined {
+  if (!styles) return styles
+  if (!commonObjs || typeof commonObjs.has !== 'function' || typeof commonObjs.get !== 'function') {
+    return styles
+  }
+  const out: Record<string, TextStyle> = {}
+  for (const [key, style] of Object.entries(styles)) {
+    out[key] = buildEnrichedStyle(style, readFontObj(commonObjs, key))
+  }
+  return out
+}
+
+/**
+ * Async variant of `enrichTextStyles` that also binds embedded PDF font faces into
+ * `document.fonts` at their true weight/style so inline edits and rasterized saves match the PDF.
+ */
+export async function enrichTextStylesAsync(
+  commonObjs: PageCommonObjsLike | null | undefined,
+  styles?: Record<string, TextStyle>,
+): Promise<Record<string, TextStyle> | undefined> {
+  if (!styles) return styles
+  if (!commonObjs || typeof commonObjs.has !== 'function' || typeof commonObjs.get !== 'function') {
+    return styles
+  }
+  const entries = await Promise.all(
+    Object.entries(styles).map(async ([key, style]) => {
+      const fontObj = readFontObj(commonObjs, key)
+      const base = buildEnrichedStyle(style, fontObj)
+      const embeddedFont = fontObj
+        ? await ensureEmbeddedFontFace(fontObj, Boolean(base.bold), Boolean(base.italic))
+        : undefined
+      return [key, embeddedFont ? { ...base, embeddedFont } : base] as const
+    }),
+  )
+  return Object.fromEntries(entries)
 }
 
 export interface EditableTextBlock {
@@ -42,6 +303,9 @@ export interface EditableTextBlock {
   bold: boolean
   italic: boolean
   underline?: boolean
+  fontFamily?: TextFontFamily
+  fontName?: string
+  embeddedFont?: string
 }
 
 export interface EditablePageImage {
@@ -69,6 +333,10 @@ export interface TextContentEdit extends ContentEditBase {
   bold: boolean
   italic: boolean
   underline?: boolean
+  fontFamily?: TextFontFamily
+  fontName?: string
+  embeddedFont?: string
+  fontChoice?: TextFontChoice
   /** hex */
   color: string
   /** rasterized replacement, base64 PNG without the prefix; '' when deleted */
@@ -102,8 +370,22 @@ interface TextFragment {
   height: number
   bold: boolean
   italic: boolean
+  fontFamily: TextFontFamily
+  fontName?: string
+  embeddedFont?: string
   /** horizontal gap to the previous fragment on the same line; 0 for a line's first fragment */
   gap: number
+}
+
+function inferFontFamily(probe: string, style?: TextStyle): TextFontFamily {
+  if (style?.isMono || /mono|courier|consolas|menlo|fira\s*code|jetbrains/i.test(probe)) {
+    return 'mono'
+  }
+  const cleaned = probe.replace(/sans-?serif/gi, '')
+  if (style?.isSerif || /serif|times|georgia|garamond|cambria|palatino/i.test(cleaned)) {
+    return 'serif'
+  }
+  return 'sans'
 }
 
 interface TextLine {
@@ -138,8 +420,9 @@ export function extractPageTextBlocks(
     if (!finite(x1) || !finite(baseline) || !finite(fontSize) || fontSize <= 0) continue
     const width = finite(item.width) ? item.width : 0
     const fontName = typeof item.fontName === 'string' ? item.fontName : ''
-    // pdf.js often normalizes embedded fonts to a generic family, so these flags are best-effort
-    const probe = `${styles?.[fontName]?.fontFamily ?? ''} ${fontName}`
+    const style = styles?.[fontName]
+    // pdf.js often normalizes embedded fonts to a generic family, so these flags combine styles + commonObjs
+    const probe = `${style?.fontFamily ?? ''} ${fontName}`
     fragments.push({
       str: item.str,
       x1,
@@ -147,8 +430,11 @@ export function extractPageTextBlocks(
       baseline,
       fontSize,
       height: finite(item.height) && item.height > 0 ? item.height : fontSize,
-      bold: /bold|black|semibold|demi|heavy/i.test(probe),
-      italic: /italic|oblique/i.test(probe),
+      bold: Boolean(style?.bold) || /bold|black|semibold|demi|heavy/i.test(probe),
+      italic: Boolean(style?.italic) || /italic|oblique/i.test(probe),
+      fontFamily: inferFontFamily(probe, style),
+      ...(style?.fontName ? { fontName: style.fontName } : {}),
+      ...(style?.embeddedFont ? { embeddedFont: style.embeddedFont } : {}),
       gap: 0,
     })
   }
@@ -188,6 +474,8 @@ export function extractPageTextBlocks(
     const xe = line.fragments.map((f) => f.x2)
     const yBase = Math.min(...line.fragments.map((f) => f.baseline))
     const yTop = Math.max(...line.fragments.map((f) => f.baseline + f.height))
+    const first = line.fragments[0]
+    const fontFamily = first?.fontFamily ?? 'sans'
     return {
       id: `t${pageIndex}-${index}`,
       pageIndex,
@@ -201,6 +489,9 @@ export function extractPageTextBlocks(
       fontSize: line.fontSize,
       bold: line.fragments.some((f) => f.bold),
       italic: line.fragments.some((f) => f.italic),
+      ...(fontFamily !== 'sans' ? { fontFamily } : {}),
+      ...(first?.fontName ? { fontName: first.fontName } : {}),
+      ...(first?.embeddedFont ? { embeddedFont: first.embeddedFont } : {}),
     }
   })
 }
@@ -338,19 +629,23 @@ export function sampleCanvasColors(
   const ctx = canvas.getContext('2d')
   if (!ctx) return fallback
 
-  const midX = clamp(Math.floor((x1 + x2) / 2), 0, w - 1)
-  const midY = clamp(Math.floor((y1 + y2) / 2), 0, h - 1)
-  const border: [number, number][] = [
-    [clamp(x1 - 1, 0, w - 1), midY],
-    [clamp(x2, 0, w - 1), midY],
-    [midX, clamp(y1 - 1, 0, h - 1)],
-    [midX, clamp(y2, 0, h - 1)],
-  ]
+  const iw = x2 - x1
+  const ih = y2 - y1
+  const border: [number, number][] = []
+  // Sample along all 4 edges just outside the box so adjacent-line ink on one edge cannot taint bg
+  for (const frac of [0.15, 0.38, 0.62, 0.85]) {
+    const bx = clamp(Math.floor(x1 + iw * frac), 0, w - 1)
+    const by = clamp(Math.floor(y1 + ih * frac), 0, h - 1)
+    border.push(
+      [clamp(x1 - 1, 0, w - 1), by],
+      [clamp(x2, 0, w - 1), by],
+      [bx, clamp(y1 - 1, 0, h - 1)],
+      [bx, clamp(y2, 0, h - 1)],
+    )
+  }
 
   // Coarse interior grid: enough probes to find the ink color, few enough to stay cheap
   const probes: [number, number][] = []
-  const iw = x2 - x1
-  const ih = y2 - y1
   if (iw > 0 && ih > 0) {
     const cols = Math.min(40, iw)
     const rows = Math.min(40, ih)
@@ -380,20 +675,10 @@ export function sampleCanvasColors(
     return [data[i]!, data[i + 1]!, data[i + 2]!]
   }
 
-  let sumR = 0
-  let sumG = 0
-  let sumB = 0
-  for (const [x, y] of border) {
-    const [r, g, b] = pixel(x, y)
-    sumR += r
-    sumG += g
-    sumB += b
-  }
-  const bg: [number, number, number] = [
-    sumR / border.length,
-    sumG / border.length,
-    sumB / border.length,
-  ]
+  const borderSamples = border.map(([x, y]) => pixel(x, y))
+  const luma = ([r, g, b]: [number, number, number]) => 0.2126 * r + 0.7152 * g + 0.0722 * b
+  borderSamples.sort((a, b) => luma(a) - luma(b))
+  const bg = borderSamples[Math.floor(borderSamples.length / 2)]!
 
   let best: [number, number, number] | null = null
   let bestDist = -1
@@ -473,6 +758,9 @@ export function buildTextEdit(
     bold?: boolean
     italic?: boolean
     underline?: boolean
+    fontFamily?: TextFontFamily
+    fontName?: string
+    embeddedFont?: string
     /** canvas sampling scale; 1 for offscreen renders */
     scale?: number
     /** display-space top-left anchor; defaults to the block's own box */
@@ -483,6 +771,12 @@ export function buildTextEdit(
   const bold = opts.bold ?? block.bold
   const italic = opts.italic ?? block.italic
   const underline = opts.underline ?? block.underline ?? false
+  const fontFamily = opts.fontFamily ?? block.fontFamily ?? 'sans'
+  const fontName = opts.fontName ?? block.fontName
+  const embeddedFont =
+    bold === block.bold && italic === block.italic
+      ? (opts.embeddedFont ?? block.embeddedFont)
+      : undefined
   const colors = canvas
     ? sampleCanvasColors(canvas, pdfRectToCss(geom, block.origRect, opts.scale ?? 1))
     : { bgColor: FALLBACK_BG, color: FALLBACK_FG }
@@ -490,7 +784,9 @@ export function buildTextEdit(
     bold,
     italic,
     underline,
-    bgColor: colors.bgColor,
+    fontFamily,
+    fontName,
+    embeddedFont,
   })
   if (!rendered) return null
   const anchor = opts.at ?? pdfRectToCss(geom, block.origRect, 1)
@@ -512,6 +808,9 @@ export function buildTextEdit(
     bold,
     italic,
     underline,
+    ...(fontFamily !== 'sans' ? { fontFamily } : {}),
+    ...(fontName ? { fontName } : {}),
+    ...(embeddedFont ? { embeddedFont } : {}),
     color: colors.color,
     image: rendered.image,
   }

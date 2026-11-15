@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { geomDispSize, pdfRectToCss } from './annotations'
@@ -7,6 +7,7 @@ import {
   buildTextEdit,
   cropCanvasImage,
   displayBoxToPdf,
+  enrichTextStylesAsync,
   extractPageImages,
   extractPageTextBlocks,
   imageFileToPng,
@@ -21,12 +22,18 @@ import type {
   PageContentEdit,
   Rect,
   TextContentEdit,
+  TextFontChoice,
+  TextFontFamily,
 } from './content-edit'
 import { t } from './i18n/locale'
-import { renderTextBox } from './stamps'
+import {
+  fontStack,
+  measureFontAscent,
+  measureTextLinesWidth,
+  renderTextBox,
+  textBoxPadding,
+} from './stamps'
 
-/** Same stack as the rasterized text boxes, so the inline editor matches the committed bitmap */
-const EDITOR_FONT = '-apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif'
 /** Matches the content-edit fallbacks used when the page canvas cannot be sampled */
 const FALLBACK_BG = '#ffffff'
 const FALLBACK_FG = '#14171f'
@@ -36,8 +43,14 @@ const MIN_FONT = 4
 const MAX_FONT = 96
 /** Smallest box a corner handle may drag to, in display px */
 const MIN_BOX_PX = 8
-/** Approximate toolbar height, so it floats just above its box */
-const BAR_OFFSET = 34
+/** Approximate toolbar height + gap, so it floats cleanly above its box */
+const BAR_OFFSET = 42
+/** Matches PAD = 1.5pt in content-edit.ts for unedited PDF blocks */
+const ORIG_PAD = 1.5
+/** Visual padding and border inside the inline editor frame (screen CSS px, synced with styles.css) */
+const EDITOR_PAD_X = 6
+const EDITOR_PAD_Y = 3
+const EDITOR_BORDER = 1.5
 
 const clampFont = (v: number) => Math.min(MAX_FONT, Math.max(MIN_FONT, Math.round(v)))
 
@@ -118,20 +131,57 @@ interface ImageResize {
   preview: ImageContentEdit | null
 }
 
+/** A face the editor can render: the PDF's own, or one of the generic stacks */
+interface PdfFont {
+  family: TextFontFamily
+  fontName?: string
+  embeddedFont?: string
+}
+
+const FAMILY_LABELS: Record<TextFontFamily, string> = {
+  sans: 'Sans serif',
+  serif: 'Serif',
+  mono: 'Monospace',
+}
+
+const fontForChoice = (original: PdfFont, choice: TextFontChoice): PdfFont =>
+  choice === 'original'
+    ? original
+    : { family: choice, fontName: undefined, embeddedFont: undefined }
+
 /** Inline text editor: the base edit plus the draft typed into the textarea */
 interface Draft {
   /** committed edit when one exists, else the synthetic base for the first commit */
   base: TextContentEdit
-  /** editor box, display px (scale=1) */
-  box: CanvasBox
+  /** top-left of the text content itself (without editor/bitmap padding), display px (scale=1) */
+  textOrigin: { left: number; top: number }
+  /** display Y of line 0 alphabetic baseline (scale=1) so tall-ascender fonts stay aligned */
+  baselineY: number
+  /** minimum inner dimensions matching the original block, display px (scale=1) */
+  minWidth: number
+  minHeight: number
   text: string
   fontSize: number
   bold: boolean
   italic: boolean
   underline: boolean
+  fontFamily: TextFontFamily
+  fontName?: string
+  embeddedFont?: string
+  fontChoice: TextFontChoice
+  originalFont: PdfFont
+  origBold: boolean
+  origItalic: boolean
   color: string
   bgColor: string
 }
+
+const activeEmbeddedFontFor = (
+  draft: Pick<Draft, 'bold' | 'italic' | 'origBold' | 'origItalic' | 'embeddedFont'>,
+): string | undefined =>
+  draft.bold === draft.origBold && draft.italic === draft.origItalic
+    ? draft.embeddedFont
+    : undefined
 
 /**
  * Direct text & image editing overlay for one page.
@@ -235,14 +285,6 @@ export function EditPdfLayer({
   /** PDF rect → display box (scale=1), the unit displayBoxToPdf expects */
   const displayBox = (rect: Rect): CanvasBox => pdfRectToCss(geom, rect, 1)
 
-  /** Display box → absolute CSS box */
-  const cssBox = (box: CanvasBox): CSSProperties => ({
-    left: box.left * scale,
-    top: box.top * scale,
-    width: box.width * scale,
-    height: box.height * scale,
-  })
-
   const liveTransform = (id: string): string | undefined => {
     if (textDrag?.block.id === id && textDrag.moved) {
       return `translate(${textDrag.dx * scale}px, ${textDrag.dy * scale}px)`
@@ -313,6 +355,11 @@ export function EditPdfLayer({
 
   const openEditor = (block: EditableTextBlock) => {
     const existing = textEditOf(block.id)
+    const originalFont: PdfFont = {
+      family: block.fontFamily ?? 'sans',
+      fontName: block.fontName,
+      embeddedFont: block.embeddedFont,
+    }
     let base = existing
     if (!base) {
       const canvas = pageCanvas()
@@ -331,19 +378,61 @@ export function EditPdfLayer({
         bold: block.bold,
         italic: block.italic,
         underline: block.underline ?? false,
+        ...(block.fontFamily && block.fontFamily !== 'sans'
+          ? { fontFamily: block.fontFamily }
+          : {}),
+        ...(block.fontName ? { fontName: block.fontName } : {}),
+        ...(block.embeddedFont ? { embeddedFont: block.embeddedFont } : {}),
         color: colors.color,
         image: '',
       }
     }
+    const baseBox = displayBox(base.rect)
+    const pad = existing ? textBoxPadding(base.fontSize) : ORIG_PAD
+    const fontSize = clampFont(base.fontSize)
+    const fontChoice = existing?.fontChoice ?? existing?.fontFamily ?? 'original'
+    const { family: fontFamily, fontName, embeddedFont } = fontForChoice(originalFont, fontChoice)
+    const initEmbedded = activeEmbeddedFontFor({
+      bold: base.bold,
+      italic: base.italic,
+      origBold: block.bold,
+      origItalic: block.italic,
+      embeddedFont,
+    })
+    const initAscent = measureFontAscent(
+      fontSize,
+      base.bold,
+      base.italic,
+      fontFamily,
+      fontName,
+      initEmbedded,
+    )
+    const baselineY = existing
+      ? baseBox.top + pad + initAscent
+      : baseBox.top + baseBox.height - ORIG_PAD - block.fontSize * 0.25
+    const textOrigin = {
+      left: baseBox.left + pad,
+      top: baselineY - initAscent - fontSize * 0.15,
+    }
     setSelectedId(null)
     setDraft({
       base,
-      box: displayBox(base.rect),
+      textOrigin,
+      baselineY,
+      minWidth: Math.max(24, baseBox.width - pad * 2),
+      minHeight: Math.max(fontSize * 1.3, baseBox.height - pad * 2),
       text: base.text,
-      fontSize: clampFont(base.fontSize),
+      fontSize,
       bold: base.bold,
       italic: base.italic,
       underline: base.underline ?? false,
+      fontFamily,
+      fontName,
+      embeddedFont,
+      fontChoice,
+      originalFont,
+      origBold: block.bold,
+      origItalic: block.italic,
       color: base.color,
       bgColor: base.bgColor,
     })
@@ -353,12 +442,15 @@ export function EditPdfLayer({
     const d = draft
     if (!d) return
     setDraft(null)
+    const embeddedFont = activeEmbeddedFontFor(d)
     const rendered = d.text.trim()
       ? renderTextBox(d.text, d.fontSize, d.color, {
           bold: d.bold,
           italic: d.italic,
           underline: d.underline,
-          bgColor: d.bgColor,
+          fontFamily: d.fontFamily,
+          fontName: d.fontName,
+          embeddedFont,
         })
       : null
     if (!rendered) {
@@ -366,6 +458,15 @@ export function EditPdfLayer({
       onCommit({ ...d.base, text: '', image: '', underline: d.underline })
       return
     }
+    const newPad = textBoxPadding(d.fontSize)
+    const fontAscent = measureFontAscent(
+      d.fontSize,
+      d.bold,
+      d.italic,
+      d.fontFamily,
+      d.fontName,
+      embeddedFont,
+    )
     onCommit({
       ...d.base,
       text: d.text,
@@ -373,13 +474,18 @@ export function EditPdfLayer({
       bold: d.bold,
       italic: d.italic,
       underline: d.underline,
+      // Explicit so a replacement family clears the previous face instead of inheriting it
+      fontChoice: d.fontChoice,
+      fontFamily: d.fontFamily,
+      fontName: d.fontName,
+      embeddedFont: d.embeddedFont,
       color: d.color,
       bgColor: d.bgColor,
       image: rendered.image,
-      // Anchor the bitmap's top-left at the editor box: growing text grows down and right
+      // Keep line 0 baseline and left edge anchored; padding stays transparent around the glyphs
       rect: displayBoxToPdf(geom, {
-        left: d.box.left,
-        top: d.box.top,
+        left: d.textOrigin.left - newPad,
+        top: d.baselineY - fontAscent - newPad,
         width: rendered.width,
         height: rendered.height,
       }),
@@ -707,7 +813,9 @@ export function EditPdfLayer({
         // Both lists come from what pdf.js already decoded; no extra rendering
         const [content, ops] = await Promise.all([page.getTextContent(), page.getOperatorList()])
         if (cancelled) return
-        setBlocks(extractPageTextBlocks(pageNo - 1, content.items, content.styles))
+        const styles = await enrichTextStylesAsync(page.commonObjs, content.styles)
+        if (cancelled) return
+        setBlocks(extractPageTextBlocks(pageNo - 1, content.items, styles))
         setImages(extractPageImages(pageNo - 1, ops))
       } catch {
         // A page pdf.js cannot describe is simply not editable
@@ -757,10 +865,77 @@ export function EditPdfLayer({
 
   // ── Render ──
 
+  const activeEmbeddedFont = draft ? activeEmbeddedFontFor(draft) : undefined
+
+  const editorLayout = useMemo(() => {
+    if (!draft) return null
+    const lines = draft.text.replace(/\r\n?/g, '\n').split('\n')
+    const measuredW = measureTextLinesWidth(
+      lines,
+      draft.fontSize,
+      draft.bold,
+      draft.italic,
+      draft.fontFamily,
+      draft.fontName,
+      activeEmbeddedFont,
+    )
+    const caretBuffer = Math.max(8, draft.fontSize * 0.35)
+    const pageDispW = geomDispSize(geom).width
+    const availW = Math.max(draft.minWidth, pageDispW - draft.textOrigin.left - 8)
+    const contentW = Math.min(
+      availW,
+      Math.max(draft.minWidth, Math.ceil((measuredW ?? draft.minWidth) + caretBuffer)),
+    )
+    const baseContentH = Math.max(draft.minHeight, lines.length * draft.fontSize * 1.3)
+    const chromeX = (EDITOR_PAD_X + EDITOR_BORDER) * 2
+    const chromeY = (EDITOR_PAD_Y + EDITOR_BORDER) * 2
+    return {
+      left: draft.textOrigin.left * scale - (EDITOR_PAD_X + EDITOR_BORDER),
+      top: draft.textOrigin.top * scale - (EDITOR_PAD_Y + EDITOR_BORDER),
+      width: Math.ceil(contentW * scale + chromeX),
+      minOuterHeight: Math.ceil(baseContentH * scale + chromeY),
+    }
+  }, [draft, activeEmbeddedFont, geom, scale])
+
+  const [wrappedOuterHeight, setWrappedOuterHeight] = useState<number | null>(null)
+  useLayoutEffect(() => {
+    const el = editorRef.current
+    if (!editorLayout || !el) {
+      setWrappedOuterHeight(null)
+      return
+    }
+    el.style.height = `${editorLayout.minOuterHeight}px`
+    // Expand vertically if a long single line wrapped against the page margin
+    const needed = el.scrollHeight + EDITOR_BORDER * 2
+    setWrappedOuterHeight(needed > editorLayout.minOuterHeight + 1 ? needed : null)
+  }, [editorLayout, draft?.text, draft?.fontSize, draft?.bold, draft?.italic, draft?.fontFamily])
+
   const selected = selectedId ? (allImages.find((image) => image.id === selectedId) ?? null) : null
   const selectedRect = selected ? (imageEditOf(selected.id)?.rect ?? selected.origRect) : null
-  const editorCss = draft ? cssBox(draft.box) : null
+  const editorOuterHeight = editorLayout
+    ? (wrappedOuterHeight ?? editorLayout.minOuterHeight)
+    : null
+  const editorCss: CSSProperties | null =
+    editorLayout && editorOuterHeight !== null
+      ? {
+          left: editorLayout.left,
+          top: editorLayout.top,
+          width: editorLayout.width,
+          height: editorOuterHeight,
+        }
+      : null
+  const editorBox: CanvasBox | null =
+    editorLayout && editorOuterHeight !== null
+      ? {
+          left: editorLayout.left / scale,
+          top: editorLayout.top / scale,
+          width: editorLayout.width / scale,
+          height: editorOuterHeight / scale,
+        }
+      : null
   const editorPatch = draft ? renderSolidPatch(draft.bgColor) : ''
+  const editorOrigPatchCss =
+    draft && !textEditOf(draft.base.id) ? pdfRectToCss(geom, draft.base.origRect, scale) : null
 
   return (
     <div className="pdf-content-edit-layer" ref={rootRef}>
@@ -931,14 +1106,14 @@ export function EditPdfLayer({
         })()}
 
       {/* Inline text editor over the block, with its mini toolbar above */}
-      {interactive && draft && editorCss && (
+      {interactive && draft && editorCss && editorBox && (
         <>
-          {editorPatch !== '' && (
+          {editorPatch !== '' && editorOrigPatchCss && (
             <img
               className="pdf-content-edit-patch"
               src={`data:image/png;base64,${editorPatch}`}
               alt=""
-              style={editorCss}
+              style={editorOrigPatchCss}
             />
           )}
           <textarea
@@ -950,13 +1125,13 @@ export function EditPdfLayer({
               ...editorCss,
               position: 'absolute',
               pointerEvents: 'auto',
-              fontFamily: EDITOR_FONT,
+              fontFamily: fontStack(draft.fontFamily, draft.fontName, activeEmbeddedFont),
               fontSize: draft.fontSize * scale,
               fontWeight: draft.bold ? 700 : 400,
               fontStyle: draft.italic ? 'italic' : 'normal',
               textDecoration: draft.underline ? 'underline' : 'none',
               color: draft.color,
-              background: draft.bgColor,
+              background: 'transparent',
             }}
             onChange={(e) => setDraft({ ...draft, text: e.target.value })}
             onKeyDown={(e) => {
@@ -982,7 +1157,7 @@ export function EditPdfLayer({
           <div
             ref={toolbarRef}
             className="pdf-content-toolbar"
-            style={getFloatingStyle(geom, scale, draft.box)}
+            style={getFloatingStyle(geom, scale, editorBox)}
           >
             <button
               type="button"
@@ -1006,6 +1181,29 @@ export function EditPdfLayer({
             >
               +
             </button>
+
+            <select
+              className="pdf-content-font-select"
+              aria-label="Font family"
+              title="Font family"
+              value={draft.fontChoice}
+              onChange={(e) => {
+                const fontChoice = e.target.value as TextFontChoice
+                const {
+                  family: fontFamily,
+                  fontName,
+                  embeddedFont,
+                } = fontForChoice(draft.originalFont, fontChoice)
+                setDraft({ ...draft, fontChoice, fontFamily, fontName, embeddedFont })
+              }}
+            >
+              <option value="original">
+                Original · {draft.originalFont.fontName ?? FAMILY_LABELS[draft.originalFont.family]}
+              </option>
+              <option value="sans">{FAMILY_LABELS.sans}</option>
+              <option value="serif">{FAMILY_LABELS.serif}</option>
+              <option value="mono">{FAMILY_LABELS.mono}</option>
+            </select>
 
             <span className="pdf-content-divider" aria-hidden="true" />
 

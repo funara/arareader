@@ -1240,6 +1240,72 @@ test.describe('direct content editing', () => {
     }
     expect(crashes).toEqual([])
   })
+
+  test('font selection replaces the detected face, survives reopening, and saves the replacement', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'arareader-edit-font-'))
+    const path = join(dir, 'document.pdf')
+    await writeTestPdf(path, 1, 'Hello world')
+
+    const launched = await launchApp({ openFile: path })
+    const { app } = launched
+    const crashes: string[] = []
+
+    try {
+      const pdf = await waitForPageWithUrl(app, 'pdf/out')
+      pdf.on('pageerror', (error) => crashes.push(String(error)))
+      await pdf.locator('.rb-big[title="Edit PDF"]').click()
+      const block = pdf.locator('.pdf-content-block').first()
+      await expect(block).toBeVisible({ timeout: 15_000 })
+      await block.click()
+
+      const editor = pdf.locator('.pdf-content-editor-text')
+      const fontSelect = pdf.locator('.pdf-content-toolbar select[aria-label="Font family"]')
+      await expect(fontSelect).toHaveValue('original')
+      await expect(fontSelect.locator('option').first()).toContainText('Sans serif')
+      await expect
+        .poll(() => editor.evaluate((el) => getComputedStyle(el).fontFamily))
+        .toContain('Helvetica')
+
+      await fontSelect.selectOption('serif')
+      await expect
+        .poll(() => editor.evaluate((el) => getComputedStyle(el).fontFamily))
+        .toContain('Times New Roman')
+
+      await editor.fill('Edited text')
+      await pdf.locator('.pdf-content-toolbar button', { hasText: 'Apply' }).click()
+      await expect(pdf.locator('.pdf-content-edit-img')).toHaveCount(1)
+
+      // Reopening the applied edit keeps the chosen family
+      await block.click()
+      await expect(fontSelect).toHaveValue('serif')
+      await fontSelect.selectOption('original')
+      await expect(fontSelect).toHaveValue('original')
+      await expect
+        .poll(() => editor.evaluate((el) => getComputedStyle(el).fontFamily))
+        .toContain('Helvetica')
+      await pdf.locator('.pdf-content-toolbar button', { hasText: 'Apply' }).click()
+      await expect(pdf.locator('.pdf-content-edit-img')).toHaveCount(1)
+
+      await pdf.keyboard.press(process.platform === 'darwin' ? 'Meta+s' : 'Control+s')
+      await expect(pdf.locator('.pdf-content-edit-img')).toHaveCount(0, { timeout: 20_000 })
+
+      const saved = await PDFDocument.load(await readFile(path), { updateMetadata: false })
+      const annots = saved.getPage(0).node.lookupMaybe(PDFName.of('Annots'), PDFArray)
+      const contents: string[] = []
+      for (let i = 0; i < (annots?.size() ?? 0); i++) {
+        const annot = saved.context.lookup(annots!.get(i), PDFDict)
+        if (annot?.lookupMaybe(PDFName.of('Subtype'), PDFName)?.decodeText() !== 'FreeText') {
+          continue
+        }
+        const text = annot.lookupMaybe(PDFName.of('Contents'), PDFHexString)
+        if (text) contents.push(text.decodeText())
+      }
+      expect(contents).toContain('Edited text')
+    } finally {
+      await closeReader(launched)
+    }
+    expect(crashes).toEqual([])
+  })
 })
 
 test.describe('view modes', () => {

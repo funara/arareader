@@ -51,8 +51,81 @@ export const DEFAULT_HEADER_FOOTER: HeaderFooterConfig = {
   color: '#666666',
 }
 
-const FONT = (px: number, bold = false, italic = false) =>
-  `${italic ? 'italic ' : ''}${bold ? '600 ' : ''}${px}px -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif`
+export type TextFontFamily = 'sans' | 'serif' | 'mono'
+
+const FONT_STACKS: Record<TextFontFamily, string> = {
+  // Latin document fonts come before CJK fallbacks so Windows does not render Latin text in Microsoft YaHei
+  sans: '"Helvetica Neue", Helvetica, Arial, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+  serif: 'Georgia, "Times New Roman", Times, "Songti SC", "SimSun", serif',
+  mono: '"SF Mono", Consolas, "Courier New", Menlo, "PingFang SC", "Microsoft YaHei", monospace',
+}
+
+const quoteFont = (name: string): string => `"${name.replace(/["\\\r\n]/g, '').trim()}"`
+
+export const fontStack = (
+  family: TextFontFamily = 'sans',
+  fontName?: string,
+  embeddedFont?: string,
+): string => {
+  const custom: string[] = []
+  // Prefer the PDF's own embedded glyphs first, falling back to OS fontName only for missing glyphs
+  for (const raw of [embeddedFont, fontName]) {
+    const clean = raw?.trim()
+    if (!clean) continue
+    const quoted = quoteFont(clean)
+    if (!custom.includes(quoted)) custom.push(quoted)
+  }
+  return custom.length > 0 ? `${custom.join(', ')}, ${FONT_STACKS[family]}` : FONT_STACKS[family]
+}
+
+export const textFont = (
+  px: number,
+  bold = false,
+  italic = false,
+  family: TextFontFamily = 'sans',
+  fontName?: string,
+  embeddedFont?: string,
+): string =>
+  `${italic ? 'italic ' : ''}${bold ? '700 ' : ''}${px}px ${fontStack(family, fontName, embeddedFont)}`
+
+export const textBoxPadding = (fontSize: number): number => Math.max(2, fontSize * 0.25)
+
+export function measureTextLinesWidth(
+  lines: readonly string[],
+  fontSize: number,
+  bold = false,
+  italic = false,
+  family: TextFontFamily = 'sans',
+  fontName?: string,
+  embeddedFont?: string,
+): number | null {
+  const ctx = document.createElement('canvas').getContext('2d')
+  if (!ctx) return null
+  ctx.font = textFont(fontSize, bold, italic, family, fontName, embeddedFont)
+  return Math.max(0, ...lines.map((line) => ctx.measureText(line).width))
+}
+
+/**
+ * Distance from the alphabetic baseline to the top of the em box used by `textBaseline = 'top'`,
+ * falling back to `fontSize` when the canvas lacks `fontBoundingBoxAscent`.
+ */
+export function measureFontAscent(
+  fontSize: number,
+  bold = false,
+  italic = false,
+  family: TextFontFamily = 'sans',
+  fontName?: string,
+  embeddedFont?: string,
+): number {
+  const ctx = document.createElement('canvas').getContext('2d')
+  if (!ctx) return fontSize
+  ctx.font = textFont(fontSize, bold, italic, family, fontName, embeddedFont)
+  ctx.textBaseline = 'alphabetic'
+  const ascent = ctx.measureText('M').fontBoundingBoxAscent
+  return typeof ascent === 'number' && Number.isFinite(ascent) && ascent > 0 ? ascent : fontSize
+}
+
+const FONT = (px: number, bold = false, italic = false) => textFont(px, bold, italic, 'sans')
 
 function toBase64(canvas: HTMLCanvasElement): string {
   return canvas.toDataURL('image/png').split(',')[1] ?? ''
@@ -194,18 +267,35 @@ export function renderTextBox(
   text: string,
   fontSize: number,
   color: string,
-  opts: { bold?: boolean; italic?: boolean; underline?: boolean; bgColor?: string } = {},
+  opts: {
+    bold?: boolean
+    italic?: boolean
+    underline?: boolean
+    bgColor?: string
+    fontFamily?: TextFontFamily
+    fontName?: string
+    embeddedFont?: string
+  } = {},
 ): { image: string; width: number; height: number } | null {
   const lines = text.replace(/\r\n?/g, '\n').split('\n')
   if (lines.every((l) => !l.trim())) return null
-  const { bold = false, italic = false, underline = false, bgColor } = opts
+  const {
+    bold = false,
+    italic = false,
+    underline = false,
+    bgColor,
+    fontFamily = 'sans',
+    fontName,
+    embeddedFont,
+  } = opts
 
-  const pad = Math.max(2, fontSize * 0.25)
+  const pad = textBoxPadding(fontSize)
   const lineH = fontSize * 1.3
+  const font = textFont(fontSize, bold, italic, fontFamily, fontName, embeddedFont)
   // Measure at 1x so the result is already in pt, matching the annotation's user-space rect
   const probe = document.createElement('canvas').getContext('2d')
   if (!probe) return null
-  probe.font = FONT(fontSize, bold, italic)
+  probe.font = font
   const width = Math.max(...lines.map((l) => probe.measureText(l).width))
 
   const canvas = document.createElement('canvas')
@@ -214,7 +304,7 @@ export function renderTextBox(
   const ctx = canvas.getContext('2d')
   if (!ctx) return null
   ctx.scale(SS, SS)
-  ctx.font = FONT(fontSize, bold, italic)
+  ctx.font = font
   // Background first, so the supersampled text sits on top of it
   if (bgColor) {
     ctx.fillStyle = bgColor

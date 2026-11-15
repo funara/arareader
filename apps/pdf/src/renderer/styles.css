@@ -1932,6 +1932,10 @@ textarea {
   white-space: nowrap;
   max-width: calc(100% - 16px);
   box-sizing: border-box;
+  /* Narrow windows keep every control reachable by scrolling instead of clipping */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
 }
 
 .pdf-content-toolbar button,
@@ -1967,6 +1971,7 @@ textarea {
   color: var(--text);
   font-size: 12px;
   text-align: center;
+  appearance: textfield;
   -moz-appearance: textfield;
 }
 
@@ -1986,6 +1991,18 @@ textarea {
   cursor: pointer;
 }
 
+.pdf-content-toolbar .pdf-content-font-select {
+  flex-shrink: 0;
+  max-width: 124px;
+  padding: 3px 4px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .pdf-content-divider {
   width: 1px;
   height: 16px;
@@ -1994,17 +2011,23 @@ textarea {
   flex-shrink: 0;
 }
 
-/* Inline editor: sits exactly over the block it replaces; background comes from inline style */
+/* Inline editor: frame sits outside text origin via JS offset */
 .pdf-content-editor-text {
   position: absolute;
   margin: 0;
-  padding: 0;
+  padding: 3px 6px;
   border: 1.5px solid var(--accent);
-  border-radius: 2px;
+  border-radius: 4px;
+  outline: none;
+  box-shadow:
+    0 0 0 3px var(--accent-soft),
+    0 4px 12px rgba(15, 23, 42, 0.08);
   line-height: 1.3;
   overflow: hidden;
   resize: none;
   box-sizing: border-box;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
 }
 
 /* ---- Stamp (Watermark / Header-Footer) & Properties Dialogs ---- */

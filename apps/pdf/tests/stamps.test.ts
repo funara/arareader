@@ -3,6 +3,7 @@ import {
   DEFAULT_HEADER_FOOTER,
   DEFAULT_WATERMARK,
   buildStamps,
+  fontStack,
   renderTextBox,
   renderWatermark,
   type HeaderFooterConfig,
@@ -206,7 +207,7 @@ describe('renderTextBox', () => {
     const box = renderTextBox('Hi', 12, '#14171f')
     expect(box).not.toBeNull()
     expect(probe().font).toBe(draw().font)
-    expect(draw().font).not.toContain('600')
+    expect(draw().font).not.toContain('700')
     expect(draw().font).not.toContain('italic')
     expect(draw().texts).toEqual(['Hi'])
     expect(draw().ops).toEqual(['text:Hi'])
@@ -219,7 +220,7 @@ describe('renderTextBox', () => {
   it('uses the bold weight for measuring and drawing', () => {
     const box = renderTextBox('Hi', 12, '#14171f', { bold: true })
     expect(box).not.toBeNull()
-    expect(probe().font).toContain('600 ')
+    expect(probe().font).toContain('700 ')
     expect(draw().font).toBe(probe().font)
     expect(draw().font).not.toContain('italic')
     expect(draw().texts).toEqual(['Hi'])
@@ -230,12 +231,12 @@ describe('renderTextBox', () => {
     expect(box).not.toBeNull()
     expect(probe().font).toContain('italic ')
     expect(draw().font).toBe(probe().font)
-    expect(draw().font).not.toContain('600')
+    expect(draw().font).not.toContain('700')
   })
 
   it('puts italic before the bold weight in the font string', () => {
     renderTextBox('Hi', 12, '#14171f', { bold: true, italic: true })
-    expect(draw().font.startsWith('italic 600 ')).toBe(true)
+    expect(draw().font.startsWith('italic 700 ')).toBe(true)
   })
 
   it('draws an underline beneath the text when underline is true', () => {
@@ -263,5 +264,10 @@ describe('renderTextBox', () => {
   it('returns null for blank text', () => {
     expect(renderTextBox('   ', 12, '#14171f')).toBeNull()
     expect(contexts).toHaveLength(0)
+  })
+
+  it('orders embedded PDF font before OS fontName so existing PDF glyphs take priority', () => {
+    const stack = fontStack('sans', 'Inter', 'ara-pdf-g_d0_f1')
+    expect(stack.indexOf('"ara-pdf-g_d0_f1"')).toBeLessThan(stack.indexOf('"Inter"'))
   })
 })
