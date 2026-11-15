@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Read mode toolbar:** Navigate pages, adjust zoom, and change the view from a floating toolbar that hides when idle. The exit control has a red accent that becomes solid on hover.
 - **PDF footer:** Jump to a page by number and access view controls consistent with Read mode alongside zoom and fullscreen.
+- **Text editing fonts:** Choose the original PDF font, sans serif, serif, or monospace from the inline text editor. The choice applies to the preview and the saved replacement, and is restored when you reopen the edit.
 
 ### Changed
 
@@ -19,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **AI recommendations:** The option is selected by default during new AI setups and can be turned off before setup completes. Existing saved choices are preserved; installations without a prior choice remain off. When enabled, opening a PDF can send limited document context to the configured AI provider.
 - **PNG export:** Render and write pages one at a time to reduce the amount of image data held at once.
 - **Office attachments:** Limit expanded PowerPoint and spreadsheet data before extracting text.
+- **Text editing detection:** Recover the PDF's actual font family, including non-embedded system fonts, and show the detected name in the editor's Original option.
 
 ### Fixed
 
