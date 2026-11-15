@@ -539,9 +539,9 @@ export function Home({ active }: { active: boolean }) {
                   else setShowChangelog(true)
                 }}
                 title={versionTitle}
-                aria-label={`${t('versionLabel')}: v${appVersion || '0.2.4'}`}
+                aria-label={`${t('versionLabel')}: v${appVersion || '0.3.0'}`}
               >
-                <span>v{appVersion || '0.2.4'}</span>
+                <span>v{appVersion || '0.3.0'}</span>
                 {updatePending && (
                   <span
                     className={`version-pulse-dot ${

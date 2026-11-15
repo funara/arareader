@@ -108,34 +108,32 @@ test('Read mode floating toolbar hides only when idle and keeps reading controls
     await expect(close).toHaveCSS('width', '36px')
     await expect(close).toHaveCSS('height', '36px')
     await toolbar.screenshot({ path: screenshotPath('read-toolbar-close-light') })
-    const expectHoverColors = async () => {
-      await close.hover()
-      const colors = await close.evaluate((element) => {
+    const expectCloseColors = async () => {
+      await pdf.mouse.move(10, 100)
+      const resting = await close.evaluate((element) => {
         const probe = document.createElement('span')
         probe.style.color = 'var(--danger)'
         probe.style.backgroundColor = 'var(--danger-bg)'
         element.appendChild(probe)
         const actual = getComputedStyle(element)
         const expected = getComputedStyle(probe)
-        const result = {
-          hovered: element.matches(':hover'),
-          colorMatches: actual.color === expected.color,
-          backgroundMatches: actual.backgroundColor === expected.backgroundColor,
-        }
+        const result =
+          actual.color === expected.color && actual.backgroundColor === expected.backgroundColor
         probe.remove()
         return result
       })
-      expect(colors).toEqual({ hovered: true, colorMatches: true, backgroundMatches: true })
+      expect(resting).toBe(true)
+      await close.hover()
+      await expect(close).toHaveCSS('color', 'rgb(255, 255, 255)')
+      await expect(close).toHaveCSS('background-color', 'rgb(198, 40, 40)')
+      expect(await close.evaluate((element) => element.matches(':hover'))).toBe(true)
     }
-    await expectHoverColors()
+    await expectCloseColors()
     await pdf.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'))
-    await expectHoverColors()
-    await pdf.screenshot({
-      path: screenshotPath('read-toolbar-close-dark-hover'),
-      clip: (await toolbar.boundingBox())!,
-    })
+    await expectCloseColors()
     await pdf.evaluate(() => document.documentElement.setAttribute('data-theme', 'light'))
     await expect(launched.page.locator('.tab-view-switch, .tab-exit-read')).toHaveCount(0)
+    await toolbar.hover()
     await pdf.mouse.move(10, 100)
     await expect(toolbar).toHaveClass(/is-hidden/, { timeout: 5000 })
     await pdf.mouse.move(20, 100)

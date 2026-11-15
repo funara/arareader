@@ -5,10 +5,18 @@ All notable changes to **ARAReader** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.2.4]
+## [v0.3.0]
+
+### Added
+
+- **Read mode toolbar:** Navigate pages, adjust zoom, and change the view from a floating toolbar that hides when idle. The exit control has a red accent that becomes solid on hover.
+- **PDF footer:** Jump to a page by number and access view controls consistent with Read mode alongside zoom and fullscreen.
 
 ### Changed
 
+- **Immersive reading:** Read mode enters fullscreen and restores the previous window state when you leave or switch tabs.
+- **Ribbon and assistant:** Tool groups have descriptive labels, and New chat and History have separate controls.
+- **AI recommendations:** The option is selected by default during new AI setups and can be turned off before setup completes. Existing saved choices are preserved; installations without a prior choice remain off. When enabled, opening a PDF can send limited document context to the configured AI provider.
 - **PNG export:** Render and write pages one at a time to reduce the amount of image data held at once.
 - **Office attachments:** Limit expanded PowerPoint and spreadsheet data before extracting text.
 

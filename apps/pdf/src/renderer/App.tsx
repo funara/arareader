@@ -6391,7 +6391,9 @@ export default function App() {
                 event.currentTarget.open = false
             }}
           >
-            <summary>{t('viewMode')}</summary>
+            <summary>
+              {t('viewMode')} <span aria-hidden="true">▾</span>
+            </summary>
             <div className="status-view-switch" role="group" aria-label={t('viewMode')}>
               <button
                 type="button"
@@ -6401,7 +6403,7 @@ export default function App() {
                 aria-pressed={viewMode === 'continuous'}
                 onClick={() => switchViewMode('continuous')}
               >
-                <IconContinuous size={14} /> {t('continuousView')}
+                {t('continuousView')}
               </button>
               <button
                 type="button"
@@ -6411,8 +6413,9 @@ export default function App() {
                 aria-pressed={viewMode === 'paged'}
                 onClick={() => switchViewMode('paged')}
               >
-                <IconPaged size={14} /> {t('pagedView')}
+                {t('pagedView')}
               </button>
+              <hr />
               <button
                 type="button"
                 className={`status-view-btn${spread === 1 ? ' active' : ''}`}
@@ -6421,7 +6424,7 @@ export default function App() {
                 aria-pressed={spread === 1}
                 onClick={() => setSpread(1)}
               >
-                <IconSinglePage /> {t('singlePage')}
+                {t('singlePage')}
               </button>
               <button
                 type="button"
@@ -6431,7 +6434,7 @@ export default function App() {
                 aria-pressed={spread === 2}
                 onClick={() => setSpread(2)}
               >
-                <IconSpread /> {t('twoPage')}
+                {t('twoPage')}
               </button>
             </div>
           </details>

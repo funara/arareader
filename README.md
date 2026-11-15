@@ -158,12 +158,11 @@ Network communication is strictly gated and limited to the actions below:
 
 | Platform | Target         | Configuration                                                                                             |
 | -------- | -------------- | --------------------------------------------------------------------------------------------------------- |
-| Windows  | NSIS (x64)     | Expected installer: `apps/desktop/release/ARAReader.Setup.0.2.2.exe` (per-user, with `.pdf` association). |
+| Windows  | NSIS (x64)     | Expected installer: `apps/desktop/release/ARAReader.Setup.0.3.0.exe` (per-user, with `.pdf` association). |
 | macOS    | DMG + ZIP      | Configured in `apps/desktop/electron-builder.cjs`; must be built on macOS.                                |
 | Linux    | AppImage + deb | Configured in `apps/desktop/electron-builder.cjs`; must be built on Linux.                                |
 
-Version 0.2.2 installers were not built as part of this preparation. Release
-artifacts are intended for [GitHub Releases](https://github.com/funara/arareader/releases);
+Release artifacts are intended for [GitHub Releases](https://github.com/funara/arareader/releases);
 the packaged app reads that repository from `resources/app-update.yml`. See
 [docs/RELEASE.md](docs/RELEASE.md) for the release checklist.
 

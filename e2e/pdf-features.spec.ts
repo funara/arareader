@@ -1269,10 +1269,20 @@ test.describe('view modes', () => {
       await expect(footer.getByRole('button', { name: 'Full Screen' })).toBeInViewport({ ratio: 1 })
       expect(await footer.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
       const viewMenu = footer.locator('summary')
+      await expect(viewMenu).toHaveText('View mode ▾')
       await viewMenu.click()
-      for (const label of ['Continuous', 'Single page', 'Two pages']) {
+      for (const label of ['Continuous', 'Page by page', 'Single page', 'Two pages']) {
         await expect(footer.getByRole('button', { name: label, exact: true })).toBeVisible()
       }
+      const viewOptions = footer.locator('.status-view-switch')
+      await expect(viewOptions.locator('button svg')).toHaveCount(0)
+      await expect(viewOptions.locator('button:nth-child(2) + hr + button')).toHaveText(
+        'Single page',
+      )
+      await pdf.screenshot({ path: screenshotPath('footer-view-menu-narrow-light') })
+      await pdf.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'))
+      await pdf.screenshot({ path: screenshotPath('footer-view-menu-narrow-dark') })
+      await pdf.evaluate(() => document.documentElement.setAttribute('data-theme', 'light'))
       await pdf.keyboard.press('Escape')
       await expect(viewMenu).toBeFocused()
       await viewMenu.evaluate((el) => {

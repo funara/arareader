@@ -3486,10 +3486,12 @@ textarea {
   place-items: center;
   width: 36px;
   padding: 0;
-}
-.read-toolbar .read-toolbar-exit:hover {
   color: var(--danger);
   background: var(--danger-bg);
+}
+.read-toolbar .read-toolbar-exit:hover {
+  color: #fff;
+  background: #c62828;
 }
 .read-toolbar-popup-anchor {
   position: relative;
@@ -3577,7 +3579,12 @@ textarea {
   padding: 4px 6px;
   border-radius: 4px;
   cursor: pointer;
+  list-style: none;
   white-space: nowrap;
+}
+
+.status-view-menu summary::-webkit-details-marker {
+  display: none;
 }
 
 .status-view-menu summary:hover,
@@ -3603,6 +3610,12 @@ textarea {
   box-shadow: var(--popup-shadow);
 }
 
+.status-view-switch hr {
+  width: 100%;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
 .status-view-switch .status-view-btn {
   justify-content: flex-start;
   gap: 8px;
@@ -3611,6 +3624,10 @@ textarea {
   padding: 0 8px;
   font: inherit;
   white-space: nowrap;
+}
+
+.status-view-switch .status-view-btn:not(.active) {
+  color: var(--text);
 }
 
 .status-view-btn {
